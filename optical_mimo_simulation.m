@@ -1,0 +1,612 @@
+% =========================================================================
+% 関数名: optical_mimo_simulation
+%
+% 【関数呼び出し形式】
+%   [y, H_elec, H_opt, info] = optical_mimo_simulation(x, params);
+%
+% 【概要】
+% 純粋な2次元直交座標系 (x, y) における光MIMO（インコヒーレント光・LiDAR反射型）
+% 空間伝搬シミュレーション関数。
+% 光路長差による伝搬時間遅延（Time of Flight: TOF）およびマルチパス広がりを
+% 周波数領域複素伝達関数 H(f) により厳密にモデル化。
+%
+% 【2次元座標系の定義】
+%   - x 軸: 前方進行方向（右向き正面が 0 度、距離 [m]）
+%   - y 軸: アレイ配置・横方向軸 [m]
+%   - 偏角 theta: 正面 (+x 方向) を 0 度とした xy 平面内の回転角 [deg]
+%   - 光源 (Tx) / 受光器 (Rx): y 軸上 (x = 0) に配置
+%   - 反射ターゲット: x = D に位置する y 軸方向の線分（微小線素パッチ分割）
+%   - 空間光強度: 各座標 (x, y) における合成光パワー密度 [W/m]
+% =========================================================================
+
+function [y, H_elec, H_opt, info] = optical_mimo_simulation(x, params)
+
+% ---------------------------------------------------------------------
+% 1. 入力引数の検証およびパラメータの補完
+% ---------------------------------------------------------------------
+default_params = get_default_params();
+if nargin < 2 || isempty(params)
+params = default_params;
+else
+params = fill_missing_fields(params, default_params);
+end
+
+% ---------------------------------------------------------------------
+% 2. 入力光信号 x の次元チェックと時間軸 t_vec の生成
+% ---------------------------------------------------------------------
+M_expected = length(params.tx_array);
+
+if nargin < 1 || isempty(x)
+% デフォルトテスト波形: 50 MHz 高周波正弦波、Tx #2 は位相 10 度ずらし
+fs = params.fs;
+t_vec = 0:(1/fs):100e-9;
+num_samples = length(t_vec);
+x = zeros(M_expected, num_samples);
+f_carrier = 50.0e6;
+for m = 1:M_expected
+phase_offset = (m - 1) * (10.0 * pi / 180);
+x(m, :) = 0.5 + 0.35 * sin(2 * pi * f_carrier * t_vec + phase_offset);
+end
+else
+% 入力信号が転置されている場合の補正 (M x 1 を期待)
+if size(x, 1) == 1 && size(x, 2) == M_expected
+x = x.';
+end
+num_samples = size(x, 2);
+if num_samples > 1
+t_vec = (0:(num_samples - 1)) / params.fs;
+else
+t_vec = 0;  % 静的スナップショット
+end
+end
+
+% ---------------------------------------------------------------------
+% 3. 2次元反射ターゲット幾何（線分パッチ群）の生成
+% ---------------------------------------------------------------------
+target_geo = generate_target_geometry_2d(params.target);
+
+% ---------------------------------------------------------------------
+% 4. 2次元光チャネル行列 H_opt およびパッチ別遅延データの計算
+% ---------------------------------------------------------------------
+[H_opt, patch_data] = calculate_optical_channel_2d(params.tx_array, params.rx_array, ...
+target_geo, params.rx_common, ...
+params.medium_extinction);
+
+% ---------------------------------------------------------------------
+% 5. 静的電気チャネル行列 H_elec の計算 (DC / 準静的極限ゲイン)
+% ---------------------------------------------------------------------
+G_tia = params.rx_common.tia_gain;
+R_resp = params.rx_common.responsivity;
+H_elec = G_tia * R_resp * H_opt;
+
+% ---------------------------------------------------------------------
+% 6. 受光出力信号 y の算出（TOF伝搬遅延モデル対応）
+% ---------------------------------------------------------------------
+c_speed = 2.99792458e8 / params.refractive_index;
+
+if num_samples > 1
+% 時系列信号: パッチごとの伝搬遅延を周波数領域伝達関数 H(f) で畳み込み
+dH_elec_patches = G_tia * R_resp * patch_data.dH;
+tau_patches = patch_data.path_length / c_speed;
+y_raw = simulate_tof_propagation(x, dH_elec_patches, tau_patches, params.fs);
+else
+% 静的スナップショット: 遅延は位相に影響しないため実数行列の瞬時積
+y_raw = H_elec * x;
+end
+
+y_blocked = apply_dc_block(y_raw, params.rx_common.dc_block);
+y = apply_channel_noise(y_blocked, params.noise_params);
+
+% ---------------------------------------------------------------------
+% 7. チャネル解析情報の収集
+% ---------------------------------------------------------------------
+sing_vals = svd(H_elec);
+cond_num = cond(H_elec);
+
+info.singular_values = sing_vals;
+info.condition_number = cond_num;
+info.rank = rank(H_elec);
+info.target_geometry = target_geo;
+info.H_optical = H_opt;
+info.H_electrical = H_elec;
+info.time_vector = t_vec;
+info.patch_data = patch_data;
+
+% ---------------------------------------------------------------------
+% 8. 可視化レンダリング（enable_plot が true の場合のみ実行）
+% ---------------------------------------------------------------------
+if isfield(params, 'enable_plot') && params.enable_plot
+render_simulation_visuals_2d(params, target_geo, H_elec, x, y, t_vec, cond_num);
+end
+
+end
+
+% =========================================================================
+% 内部関数群: 2次元デフォルトパラメータの取得 (2Tx x 2Rx)
+% =========================================================================
+function p = get_default_params()
+p.medium_extinction = 0.0;     % 消散係数 (0.0: 空気中, >0: 水中 [1/m])
+p.refractive_index = 1.0;      % 媒体屈折率 (空気中: 1.0, 純水: 1.33)
+p.fs = 1.0e9;                  % サンプリング周波数 [Hz] (1 GHz)
+p.enable_plot = true;          % 可視化フラグ
+
+% 送信アレイ (Tx: x=0 の y軸上に配置, ターゲット平板に対し垂直 0 deg)
+% Tx #1: (0, 0.50) [m]
+p.tx_array(1).pos = [0.0,  0.50];
+p.tx_array(1).type = 'LD';
+p.tx_array(1).pointing_deg = 0.0;
+p.tx_array(1).fwhm = 25.0;
+
+% Tx #2: (0, 0.25) [m]
+p.tx_array(2).pos = [0.0,  0.25];
+p.tx_array(2).type = 'LD';
+p.tx_array(2).pointing_deg = 0.0;
+p.tx_array(2).fwhm = 25.0;
+
+% 受光アレイ (Rx: x=0 の y軸上に配置)
+% Rx #1: (0, -0.25) [m], 内向き +5 deg
+p.rx_array(1).pos = [0.0, -0.25];
+p.rx_array(1).pointing_deg =   5.0;
+
+% Rx #2: (0, -0.50) [m], 内向き +10 deg
+p.rx_array(2).pos = [0.0, -0.50];
+p.rx_array(2).pointing_deg =  10.0;
+
+% 受光器共通仕様 (2D受光開口幅)
+p.rx_common.aperture_width = 0.01;         % 2D受光開口幅 [m] (10mm)
+p.rx_common.fov_deg = 45.0;                % 視野角 半角 [deg]
+p.rx_common.responsivity = 0.60;           % PD感度 [A/W]
+p.rx_common.tia_gain = 1.0e4;              % TIAゲイン [V/A]
+p.rx_common.dc_block = true;               % DCブロック有効化
+
+% 反射ターゲット (x = distance に置かれた y軸方向の線分壁)
+p.target.distance = 2.0;                   % x 軸距離 [m]
+p.target.length = 1.8;                     % y 方向の長さ [m]
+p.target.num_patches = 90;                 % 分割パッチ数 (線素数)
+p.target.reflectance = 0.80;               % 拡散反射率 (rho = 0.8)
+
+% ノイズ設定
+p.noise_params.enable = false;
+p.noise_params.snr_db = 30.0;
+end
+
+% =========================================================================
+% 内部関数: 未定義パラメータの再帰的補完
+% =========================================================================
+function user_s = fill_missing_fields(user_s, def_s)
+if ~isstruct(user_s)
+user_s = def_s;
+return;
+end
+
+fnames = fieldnames(def_s);
+for i = 1:length(fnames)
+f = fnames{i};
+if ~isfield(user_s, f)
+user_s.(f) = def_s.(f);
+else
+if isstruct(def_s.(f)) && isstruct(user_s.(f)) && ...
+numel(def_s.(f)) == 1 && numel(user_s.(f)) == 1
+user_s.(f) = fill_missing_fields(user_s.(f), def_s.(f));
+end
+end
+end
+end
+
+% =========================================================================
+% 内部関数: 2次元反射ターゲット線分パッチ生成
+% =========================================================================
+function target = generate_target_geometry_2d(t_params)
+K = t_params.num_patches;
+L = t_params.length;
+D = t_params.distance;
+
+y_edges = linspace(-L / 2, L / 2, K + 1);
+y_centers = (y_edges(1:end-1) + y_edges(2:end)) / 2;
+dl = L / K;
+
+target.p = zeros(K, 2);
+target.p(:, 1) = D;                        % x 座標 (距離 D)
+target.p(:, 2) = y_centers(:);             % y 座標
+target.n = repmat([-1.0, 0.0], K, 1);      % 法線は正面を向く (-x 方向)
+target.dl = dl * ones(K, 1);               % 各パッチの線素長 [m]
+target.rho = t_params.reflectance;
+end
+
+% =========================================================================
+% 内部関数: 2次元光伝搬結合係数およびパッチ別光路長の計算
+% =========================================================================
+function [H_opt, patch_data] = calculate_optical_channel_2d(tx_array, rx_array, target, rx_common, c_ext)
+M = length(tx_array);
+N = length(rx_array);
+K = size(target.p, 1);
+
+H_opt = zeros(N, M);
+dH_tensor = zeros(N, M, K);
+path_tensor = zeros(N, M, K);
+
+for m = 1:M
+tx_pos = tx_array(m).pos(1:2);
+pointing_tx = tx_array(m).pointing_deg;
+v_tx = [cosd(pointing_tx), sind(pointing_tx)];
+fwhm_m = tx_array(m).fwhm;
+type_m = tx_array(m).type;
+
+% Tx_m から全パッチへの幾何計算
+d1_vec = target.p - repmat(tx_pos, K, 1);
+r1 = sqrt(sum(d1_vec.^2, 2));
+u1 = d1_vec ./ repmat(max(r1, 1e-6), 1, 2);
+
+cos_alpha = sum(repmat(v_tx, K, 1) .* u1, 2);
+cos_alpha = max(min(cos_alpha, 1.0), -1.0);
+alpha_deg = acosd(cos_alpha);
+
+cos_psi1 = sum(-u1 .* target.n, 2);
+cos_psi1 = max(cos_psi1, 0.0);
+
+R_tx = eval_tx_radiation_2d(alpha_deg, fwhm_m, type_m);
+E_patch = (R_tx .* cos_psi1 ./ max(r1, 1e-6)) .* exp(-c_ext * r1);
+
+for n = 1:N
+    rx_pos = rx_array(n).pos(1:2);
+    pointing_rx = rx_array(n).pointing_deg;
+    v_rx = [cosd(pointing_rx), sind(pointing_rx)];
+
+    % パッチから Rx_n への幾何計算
+    d2_vec = repmat(rx_pos, K, 1) - target.p;
+    r2 = sqrt(sum(d2_vec.^2, 2));
+    u2 = d2_vec ./ repmat(max(r2, 1e-6), 1, 2);
+
+    cos_theta2 = sum(u2 .* target.n, 2);
+    cos_theta2 = max(cos_theta2, 0.0);
+
+    cos_psi2 = sum(-u2 .* repmat(v_rx, K, 1), 2);
+    cos_psi2 = max(min(cos_psi2, 1.0), -1.0);
+    psi2_deg = acosd(cos_psi2);
+
+    fov_mask = double(psi2_deg <= rx_common.fov_deg);
+
+    dH = (E_patch * (target.rho / 2.0)) .* ...
+         (cos_theta2 .* cos_psi2 ./ max(r2, 1e-6)) .* ...
+         rx_common.aperture_width .* exp(-c_ext * r2) .* fov_mask .* target.dl;
+
+    H_opt(n, m) = sum(dH);
+    dH_tensor(n, m, :) = dH;
+    path_tensor(n, m, :) = r1 + r2;   % 往復光路長 [m]
+end
+
+
+end
+
+patch_data.dH = dH_tensor;
+patch_data.path_length = path_tensor;
+end
+
+% =========================================================================
+% 内部関数: TOF周波数領域伝達関数による時系列信号の厳密伝搬シミュレーション
+% =========================================================================
+function y_out = simulate_tof_propagation(x, dH_elec_patches, tau_patches, fs)
+[M, num_samples] = size(x);
+N = size(dH_elec_patches, 1);
+
+max_tau = max(tau_patches(:));
+n_pad = ceil(max_tau * fs) + 64;
+n_fft = num_samples + n_pad;
+
+% 正の周波数ベクトル（DCからナイキスト周波数まで）
+num_pos = floor(n_fft / 2) + 1;
+f_pos = (0:(num_pos - 1)) * (fs / n_fft);
+
+y_out = zeros(N, num_samples);
+
+% 送信波形をゼロパディングしてFFT（線形畳み込み）
+X_fft = zeros(M, n_fft);
+for m = 1:M
+x_padded = [x(m, :), zeros(1, n_pad)];
+X_fft(m, :) = fft(x_padded);
+end
+
+for n = 1:N
+Y_fft_n = zeros(1, n_fft);
+for m = 1:M
+dH_km = squeeze(dH_elec_patches(n, m, :));     % [K x 1]
+tau_km = squeeze(tau_patches(n, m, :));         % [K x 1]
+
+    % 各パッチの位相回転 exp(-j 2*pi*f*tau) を積分した伝達関数 H(f)
+    phase_mat = -2.0 * pi * (tau_km * f_pos);       % [K x num_pos]
+    H_half = sum(repmat(dH_km, 1, num_pos) .* exp(1i * phase_mat), 1);
+
+    % エルミート対称性を持たせて全周波数ベクトルを構築
+    H_full = zeros(1, n_fft);
+    H_full(1:num_pos) = H_half;
+    if mod(n_fft, 2) == 0
+        H_full((num_pos + 1):n_fft) = conj(H_half(end-1:-1:2));
+    else
+        H_full((num_pos + 1):n_fft) = conj(H_half(end:-1:2));
+    end
+
+    Y_fft_n = Y_fft_n + X_fft(m, :) .* H_full;
+end
+y_time = real(ifft(Y_fft_n));
+y_out(n, :) = y_time(1:num_samples);
+
+
+end
+end
+
+% =========================================================================
+% 内部関数: 2次元放射パターン評価 (LED / LD)
+% =========================================================================
+function R = eval_tx_radiation_2d(alpha_deg, fwhm_deg, type)
+if strcmpi(type, 'LED')
+cos_half = cosd(min(fwhm_deg / 2.0, 89.0));
+m_order = -log(2.0) / log(cos_half);
+rad = alpha_deg * (pi / 180.0);
+R = zeros(size(alpha_deg));
+valid = abs(alpha_deg) <= 90.0;
+R(valid) = ((m_order + 1) / 2.0) * (cos(rad(valid)).^m_order);
+else
+sigma = (fwhm_deg / 2.0) / sqrt(2 * log(2));
+R = exp(-0.5 * (alpha_deg ./ sigma).^2);
+R(abs(alpha_deg) > 90.0) = 0.0;
+end
+end
+
+% =========================================================================
+% 内部関数: DCブロック（AC結合）処理
+% =========================================================================
+function y_out = apply_dc_block(y_in, dc_block_enabled)
+if ~dc_block_enabled
+y_out = y_in;
+return;
+end
+
+[~, num_samples] = size(y_in);
+if num_samples > 1
+dc_mean = mean(y_in, 2);
+y_out = y_in - repmat(dc_mean, 1, num_samples);
+else
+y_out = zeros(size(y_in));
+end
+end
+
+% =========================================================================
+% 内部関数: チャネル雑音の付加
+% =========================================================================
+function y_out = apply_channel_noise(y_in, noise_params)
+if ~isfield(noise_params, 'enable') || ~noise_params.enable
+y_out = y_in;
+return;
+end
+
+y_out = y_in;
+if isfield(noise_params, 'snr_db')
+snr_linear = 10^(noise_params.snr_db / 10);
+sig_power = mean(y_in(:).^2);
+if sig_power <= 0
+sig_power = 1.0;
+end
+noise_var = sig_power / max(snr_linear, 1e-12);
+noise = sqrt(noise_var) * randn(size(y_in));
+y_out = y_out + noise;
+end
+end
+
+% =========================================================================
+% 内部関数: 2次元可視化レンダリング（1グラフ1Figure、波形は上下1Figure）
+% =========================================================================
+function render_simulation_visuals_2d(params, target, H_elec, X, Y, t, cond_num)
+M = length(params.tx_array);
+N = length(params.rx_array);
+
+colors_tx = lines(max(M, 3));
+colors_rx = lines(max(N, 5));
+
+D_target = target.p(1, 1);
+y_min_t  = min(target.p(:, 2));
+y_max_t  = max(target.p(:, 2));
+
+% ---------------------------------------------------------------------
+% Figure 1: 2D幾何配置図 (2D Geometry Layout)
+% ---------------------------------------------------------------------
+figure('Name', 'Optical MIMO 2D - Geometry Layout', ...
+'NumberTitle', 'off', 'Position', [50, 480, 580, 420]);
+hold on; grid on; axis equal;
+xlabel('x-axis (Propagation Direction) [m]');
+ylabel('y-axis (Array Axis) [m]');
+title('2D Geometry Layout (Tx/Rx on y-axis, Target at x=D)');
+
+plot([D_target, D_target], [y_min_t, y_max_t], 'k-', 'LineWidth', 4.0, 'DisplayName', 'Target Line');
+
+len_arrow_tx = 0.60;   % Tx 矢印幹の長さ [m]
+len_arrow_rx = 0.50;   % Rx 矢印幹の長さ [m]
+
+for m = 1:M
+pos = params.tx_array(m).pos;
+theta = params.tx_array(m).pointing_deg;
+v_dir = [cosd(theta), sind(theta)];
+plot(pos(1), pos(2), '^', 'MarkerSize', 9, ...
+'MarkerFaceColor', colors_tx(m, :), 'Color', 'k', ...
+'DisplayName', sprintf('Tx #%d (%s, %+.0f deg)', m, params.tx_array(m).type, theta));
+
+quiver(pos(1), pos(2), v_dir(1)*len_arrow_tx, v_dir(2)*len_arrow_tx, 0, ...
+    'Color', colors_tx(m, :), 'LineWidth', 1.8, 'MaxHeadSize', 0.28, 'HandleVisibility', 'off');
+
+
+end
+
+for n = 1:N
+pos = params.rx_array(n).pos;
+theta = params.rx_array(n).pointing_deg;
+v_dir = [cosd(theta), sind(theta)];
+plot(pos(1), pos(2), 'o', 'MarkerSize', 8, ...
+'MarkerFaceColor', colors_rx(n, :), 'Color', 'k', ...
+'DisplayName', sprintf('Rx #%d (%+.0f deg)', n, theta));
+
+% Rx 矢印: 粗い破線 ('--') から細かく密なドット点線 (':') に変更
+quiver(pos(1), pos(2), v_dir(1)*len_arrow_rx, v_dir(2)*len_arrow_rx, 0, ...
+    'Color', colors_rx(n, :), 'LineWidth', 1.5, 'LineStyle', ':', 'MaxHeadSize', 0.28, 'HandleVisibility', 'off');
+
+
+end
+legend('Location', 'northeastoutside');
+xlim([-0.2, D_target + 0.3]);
+ylim([min(y_min_t, -0.6) - 0.2, max(y_max_t, 0.6) + 0.2]);
+
+% ---------------------------------------------------------------------
+% Figure 2: 空間 (x, y) における合成光強度分布ヒートマップ
+% ---------------------------------------------------------------------
+figure('Name', 'Optical MIMO 2D - Optical Intensity Distribution', ...
+'NumberTitle', 'off', 'Position', [650, 480, 600, 420]);
+hold on; grid on; axis equal;
+
+num_samples = size(X, 2);
+if num_samples > 1
+P_weights = mean(X, 2);
+weight_mode_str = 'Time-Averaged Power';
+else
+P_weights = X;
+weight_mode_str = 'Static Power';
+end
+
+gx = linspace(0.01, D_target, 80);
+gy = linspace(min(y_min_t, -0.6) - 0.2, max(y_max_t, 0.6) + 0.2, 80);
+[GX, GY] = meshgrid(gx, gy);
+field_intensity = zeros(size(GX));
+
+for m = 1:M
+t_pos = params.tx_array(m).pos;
+v_m = [cosd(params.tx_array(m).pointing_deg), sind(params.tx_array(m).pointing_deg)];
+dx = GX - t_pos(1);
+dy = GY - t_pos(2);
+dist = sqrt(dx.^2 + dy.^2);
+cos_ang = (dx * v_m(1) + dy * v_m(2)) ./ max(dist, 1e-6);
+ang = acosd(max(min(cos_ang, 1.0), -1.0));
+rad_pat = eval_tx_radiation_2d(ang, params.tx_array(m).fwhm, params.tx_array(m).type);
+
+field_intensity = field_intensity + ...
+    P_weights(m) * (rad_pat ./ max(dist, 0.05)) .* exp(-params.medium_extinction * dist);
+
+
+end
+
+contourf(GX, GY, field_intensity, 25, 'LineStyle', 'none');
+h_cb_field = colorbar;
+ylabel(h_cb_field, 'Optical Power Density [W/m]');
+try
+colormap(gca, 'copper');
+catch
+colormap('copper');
+end
+plot([D_target, D_target], [y_min_t, y_max_t], 'c-', 'LineWidth', 3.0);
+title(sprintf('Combined Optical Intensity Distribution (%s)', weight_mode_str));
+xlabel('x-axis (Propagation Direction) [m]');
+ylabel('y-axis (Array Axis) [m]');
+xlim([-0.1, D_target + 0.2]);
+
+% ---------------------------------------------------------------------
+% Figure 3: 電気チャネル行列 H_elec ヒートマップ (DC極限)
+% ---------------------------------------------------------------------
+figure('Name', 'Optical MIMO 2D - Electrical Channel Matrix', ...
+'NumberTitle', 'off', 'Position', [50, 40, 580, 390]);
+imagesc(H_elec);
+h_cb = colorbar;
+ylabel(h_cb, 'Channel Gain [V/W]');
+title(sprintf('Electrical Channel Matrix H_{elec} [V/W] (Cond: %.2f)', cond_num));
+xlabel('Transmitter Tx (m)');
+ylabel('Receiver Rx (n)');
+set(gca, 'XTick', 1:M, 'YTick', 1:N);
+set(gca, 'XTickLabel', arrayfun(@(i) sprintf('Tx #%d', i), 1:M, 'UniformOutput', false));
+set(gca, 'YTickLabel', arrayfun(@(i) sprintf('Rx #%d', i), 1:N, 'UniformOutput', false));
+
+h_min = min(H_elec(:));
+h_max = max(H_elec(:));
+h_range = max(h_max - h_min, 1e-12);
+for n = 1:N
+for m = 1:M
+val = H_elec(n, m);
+norm_val = (val - h_min) / h_range;
+if norm_val > 0.55
+text_col = 'k';
+else
+text_col = 'w';
+end
+text(m, n, sprintf('%.2e', val), ...
+'HorizontalAlignment', 'center', 'Color', text_col, 'FontWeight', 'bold', 'FontSize', 9);
+end
+end
+
+% ---------------------------------------------------------------------
+% Figure 4: 送信信号波形（上段）および受信信号波形（下段）
+% ---------------------------------------------------------------------
+figure('Name', 'Optical MIMO 2D - Transmitted and Received Signals', ...
+'NumberTitle', 'off', 'Position', [650, 40, 600, 420]);
+
+dc_status_str = 'Enabled';
+if ~params.rx_common.dc_block
+dc_status_str = 'Disabled';
+end
+
+if length(t) > 1
+t_max = max(t);
+if t_max < 1.0e-6
+t_scale = 1.0e9;
+t_unit = 'ns';
+elseif t_max < 1.0e-3
+t_scale = 1.0e6;
+t_unit = 'us';
+else
+t_scale = 1.0e3;
+t_unit = 'ms';
+end
+t_disp = t * t_scale;
+
+% 上段: 送信光強度信号波形 x(t)
+subplot(2, 1, 1);
+hold on; grid on;
+for m = 1:M
+    plot(t_disp, X(m, :), 'LineWidth', 1.5, 'Color', colors_tx(m, :), ...
+        'DisplayName', sprintf('Tx #%d Input Power', m));
+end
+xlabel(sprintf('Time [%s]', t_unit));
+ylabel('Optical Power [W]');
+xlim([0, max(t_disp)]);
+title('Transmitted Optical Power Waveforms x(t)');
+legend('Location', 'northeast');
+
+% 下段: 受光出力電圧信号波形 y(t)
+subplot(2, 1, 2);
+hold on; grid on;
+for n = 1:N
+    plot(t_disp, Y(n, :), 'LineWidth', 1.5, 'Color', colors_rx(n, :), ...
+        'DisplayName', sprintf('Rx #%d Output Voltage', n));
+end
+xlabel(sprintf('Time [%s]', t_unit));
+ylabel('Output Voltage [V]');
+xlim([0, max(t_disp)]);
+title(sprintf('Received Output Voltage Waveforms y(t) (DC Block: %s, TOF-mode)', dc_status_str));
+legend('Location', 'northeast');
+
+
+else
+subplot(2, 1, 1);
+bar(1:M, X, 'FaceColor', [0.85, 0.45, 0.2]);
+xlabel('Transmitter Tx (m)');
+ylabel('Optical Power [W]');
+set(gca, 'XTick', 1:M);
+set(gca, 'XTickLabel', arrayfun(@(i) sprintf('Tx #%d', i), 1:M, 'UniformOutput', false));
+title('Transmitted Static Optical Power x');
+
+subplot(2, 1, 2);
+bar(1:N, Y, 'FaceColor', [0.2, 0.5, 0.8]);
+xlabel('Receiver Rx (n)');
+ylabel('Output Voltage [V]');
+set(gca, 'XTick', 1:N);
+set(gca, 'XTickLabel', arrayfun(@(i) sprintf('Rx #%d', i), 1:N, 'UniformOutput', false));
+title(sprintf('Received Static Output Voltage y (DC Block: %s)', dc_status_str));
+
+
+end
+
+end
+

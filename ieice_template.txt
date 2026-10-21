@@ -1,0 +1,184 @@
+Specific knowledge of the reviewer on the topic: (choose one)
+_ 5 (Excellent)
+_ 4
+_ 3
+X 2
+_ 1 (Fair)
+
+Confidential comments for the Editorial Committee not to be 
+disclosed to the author(s).
+
+----------------------
+
+
+REPLY FORM 2
+
+Reviewer's Report (Please choose one at each category)
+
+1. Originality: (Has/Have the author(s) contributed original work that has added new information or knowledge to previous work?)
+_ Excellent
+X Good
+_ Fair
+_ Poor*
+
+2. Practicality: (Are the results useful from an academic or industrial viewpoint?)
+_ Excellent
+X Good
+_ Fair
+_ Poor*
+
+3. Reliability: (Is the discussion in the manuscript logical or technically reliable?)
+_ Excellent
+_ Good
+X Fair
+_ Poor*
+
+4. References: (Are references adequate?)
+X YES
+_ NO*
+
+5. Presentation: (Clarity, Organization, Conciseness)
+_ Excellent
+_ Good
+X Fair
+_ Poor*	
+	
+6. English grammar and spelling
+_ Excellent
+_ Good
+X Fair
+_ Poor*	
+
+*If NO or POOR is marked in Items 1 to 6, please give specific 
+comments in REPLY FORM 3. 
+
+7. Over-all judgment: (The quality of the technical content of the manuscript)
+_ Excellent
+_ Good (an average contribution)
+X Fair (a minor contribution)
+_ Poor
+
+-------------------------------
+
+REPLY FORM 3
+
+Note to the reviewer:
+
+(1)Please do not identify yourself or your affiliation on this page, 
+   as a copy of this sheet may be sent to the author(s) directly.
+(2)Please give detailed and objective comments and suggestions 
+   citing both strengths and weakness of the manuscript. 
+   Please type or print clearly.
+(3)If revision of the manuscript is recommended, please clarify 
+   the revisions required for acceptance. Distinguish mandatory 
+   revisions from optional revisions.
+(4)If the evaluation is "Acceptance", your comments for revision 
+   should be limited to editorial matters such as typographical errors.
+
+
+-------------------------------
+
+Please check the following checklist if you choose "Conditional acceptance."
+
+1. Have you clarified which part of the paper requires revision/modification by the comments? (Choose one)
+X Yes
+_ No 
+
+2. Are the criteria for acceptance shown clearly? (Choose one)
+X Yes
+_ No
+
+3. Do you think the author(s) can satisfy all the conditions in a single revision round?
+ (Choose one)
+X Yes
+_ No
+
+Note that “Rejection” should be selected if it requires a major revision. You can find the detailed information in “Procedures and Standards for Reviewing the IEICE Transactions on Communications.” You can download it from the IEICE Manuscript Management System:
+https://review.ieice.org/reviewreply/review_reply_e.aspx
+
+Notice
+Reviewers should set appropriate conditions for acceptance so that the author(s) can understand why the modification is necessary and where and what to modify in the manuscript.
+(Bad examples)
+Please confirm that the conditions are not as the following bad examples:
+- Conditions should not be a question. For instance, "What is ...?" is a bad example.
+- Conditions should be clear to the author(s) about what to modify in the manuscript. For instance, "The reviewer cannot understand ...." and "... is not correct." are bad examples.
+- Editorial modifications should not be a condition for acceptance. Please put them as a minor comment.
+- Reviewers should not start any technical discussions.
+
+(Good examples)
+Good examples of the conditions are as follows:
+- “Please explain about ...”
+- “Please add some explanations about ...”
+- “Please modify the description about ...”
+
+Before submitting the review report, please confirm that your comments are appropriate from the above points of view once again.
+
+
+Please check the following checklist if you choose "Rejection."
+
+1. Is the reason for the rejection shown clearly? (Choose one)
+_ Yes
+_ No
+Note that reviewers should clarify the reason for the rejection.
+
+2. If the reason for the rejection is the lack of novelty, have you indicated any existing paper or work? (Choose one)
+_ Yes
+_ No
+Note that reviewers should show some existing papers if the reason for the rejection is the lack of novelty.
+
+Please choose at least one reason for the rejection.
+
+1. IEICE Transaction on Communications accepts wide area of research topic. However, this paper is out of the scope of this transaction.
+2. This paper includes some essential flaws.
+3. This paper has no novelty because the essential point of this paper is included in some existing papers.
+4. The effectiveness of this paper is not sufficient for publication.
+5. This paper includes some unclearness in presentation and organization. It is difficult to understand the contents of this paper. Therefore, the reviewer cannot evaluate the novelty and effectiveness of this paper. The authors are encouraged to resubmit it after careful considerations. 
+6. This paper includes some good points in terms of the novelty and effectiveness for readers. However, due to the unclearness in presentation and organization, it is difficult to fully understand the contents of this paper. The authors are encouraged to resubmit it after careful considerations. 
+7. This paper lacks reliability. The authors are encouraged to resubmit it after careful considerations.
+8. Major revision is required. Therefore, if the reviewer sets some conditions for acceptance, it is difficult for the author(s) to modify them once. The authors are encouraged to modify the manuscript appropriately and resubmit it.
+9. The conditions for acceptance are not fully satisfied. The authors are encouraged to modify the manuscript and resubmit it.
+10. Another reason
+
+Before submitting the review report, please confirm that your comments are appropriate from the above points of view once again.
+
+----------------------------------------
+
+
+An innovative approach relevant to SI optimization in high-speed serial links, particularly a link working with PAM4 modulation at PCIe 6.0 speeds, is proposed in this paper. The composition of a DNN framework together with an R-L-C differential equalizer optimized by BO and IL is understood as one of the probable quick remedies against laborious traditional simulations. Therefore, in spite of specific novelty discussion regarding the R-L-C equalizer and pre-trained DNNs initial training being more detailed than what has been presented here, there hybrid ML approach bears substantial novelty and utility. Experimental results have revealed improved computational efficiency and key SI metrics that can open up new insights for readers involved with machine learning applications on hardware design activities concerning high-speed digital designs.
+
+In the revised paper, please pay attention to the following points:
+
+1. Clarify the expression of "Experimental Verification" in Section 2.3
+(Section 2.3, title and p.5, left column, 1st line in last paragraph)
+The Section 2.3's title "Experimental Verification" may give the false impression that physical value measurements using real hardware (e.g., oscilloscopes, network analyzers) were conducted. However, the content of Section 2.3  indicates that the validation is based on simulations (ADS and EM tools). Please either rename the section to such as "Simulation-based Verification".
+
+2. Clarify applicability beyond PAM4
+The way used does not look to use any characteristic that is only for the PAM4 signal, like the way multi-level amplitude transitions or its waveforms. The current title and words in this paper used now might make it seem this way is just for PAM4. To stop any wrong ideas, it might be good to say in this paper such that the way to make it better can be used with other modulation format, not just PAM4.
+
+3. Clarify whether the R, L, and C values in Table 1 are approximate values or parameter adjustment ranges
+(Table 1 and p.4, left column, last sentense in 1st paragraph)
+The values of R, L, and C shown in Table 1 do not appear to be approximate estimates based on physical characteristics. Rather, they seem to represent the parameter adjustment ranges specified in the "Tune" function of ADS during the fitting process of the R-L-C model to the S-parameters of the via structure. Please revise the description to clarify this point explicitly.
+
+4. Clarify the input and output data of DNN1 and DNN2 more explicitly
+(Fig. 11, or 1st and 2nd paragraph in Section 4.2)
+Please clarify what input and output data are used in DNN1 (based on BO) and DNN2 (based on IL). A simple addition to Fig. 11 or a short description in the corresponding section would help readers better understand how each neural network functions within the optimization process.
+
+5. Add a brief explanation for the use of the ReLU activation function
+(p.8, left column, 3rd line in 2nd paragraph)
+In this paper, the ReLU activation function is used in the DNNs. While the function is a common choice in ML, briefly mentioning the reason for choosing ReLU over other functions (such as sigmoid or tanh) would improve the clarity of your methodology.
+
+6. Clarify the difference between "Eye height of judgment" and "Eye height of Simulation"
+(Table 8 and related text in Section 4.3)
+For example, the meaning of the term "judgment" in expressions such as "Eye height of judgment" is not clearly defined. Please clarify whether this refers to the predicted eye height used as the objective function in the DNN+BO/IL optimization processes, and explain how it differs from the actual simulation result ("Eye height of simulation").
+
+7. Clarify the meaning of "Iteration"
+(Section 4.3, 1st paragraph and Table 8)
+The term "iteration" in Section4.3 appears to correspond to the optimization steps (variables B or N) in the BO/IL algorithms in p.8, rather than to the training epochs of the DNN. Please consider clarifying this explicitly in the text or table caption, to avoid confusion between different levels of iteration used in your method.
+
+8. Clarify "IL" as abbreviation for "Imitation Learning", not "insertion loss"
+(p.4, right column, 4th line from the bottom)
+"IL" is used in this paper as an abbreviation for "Imitation Learning", but in this sentence, it is apparently used as an abbreviation for "insertion loss". Since "IL" is not used elsewhere to denote "insertion loss", please revise this part for clarity. For example, consider spelling out "insertion loss" here instead of using the abbreviation.
+
+9. Correct typos including capitalization and punctuation
+(e.g. Section 4.4, beginning of 1st paragraph)
+Some typos are observed in the manuscript. For example, in the beginning of Chapter 4.4, "we verify the feasibility..." should be corrected to "We verify the feasibility...", and "four methods, The superior..." should be "four methods. The superior..." with a period instead of a comma. Please carefully that there may be other similar issues elsewhere. 

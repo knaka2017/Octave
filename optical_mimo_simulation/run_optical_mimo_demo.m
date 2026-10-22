@@ -6,8 +6,10 @@
 % 2次元光MIMO空間伝搬シミュレーション関数の高周波検証デモスクリプトです。
 %
 % 【検証ポイント】
-%   - fs = 1 GHz, f_carrier = 50 MHz による高周波正弦波変調
-%   - ターゲット距離 2m（往復約 4m）による光の到達遅延（約 13.6 ns の無信号時間）
+%   - fs = 2 GHz, f_carrier = 200 MHz による高周波正弦波変調
+%   - 連続送信の定常状態 (initial_state = 'steady') における受光モジュール
+%     (C5658: 0.05 MHz ～ 1 GHz, AC結合) 出力波形
+%     ※ 'zero' に変更すると、光の到達遅延（約 13.6 ns の無信号時間）と点灯直後の過渡を観測可能
 %   - 光路長差（Rx #1 と Rx #2 の幾何距離差）によって生じる受光波形の目視可能な位相差
 % =========================================================================
 
@@ -26,11 +28,11 @@ fprintf('  =======================================================\n\n');
 fprintf('--- [ケース 1] 高周波時系列シミュレーション (TOF位相差検証) ---\n');
 
 % 1. 時間軸および送信光強度信号 x(t) の定義
-fs = 2.0e9;                     % サンプリング周波数 1 GHz (1 ns 分解能)
+fs = 2.0e9;                     % サンプリング周波数 2 GHz (0.5 ns 分解能)
 dt = 1 / fs;
-t_stop = 50e-9;                % 解析時間 100 ns (50 MHz の 5 周期分)
-t_vec = 0:dt:t_stop;
-num_samples = length(t_vec);
+t_stop = 50e-9;                % 解析時間 50 ns (200 MHz の 10 周期分: 定常状態では信号周期の整数倍とする)
+num_samples = round(t_stop * fs);
+t_vec = (0:(num_samples - 1)) * dt;   % 周期の継ぎ目が重複しないよう終端 t_stop は含めない
 
 % 送信搬送周波数 50 MHz（周期 20 ns）
 % ※ 100 MHz や 200 MHz に引き上げると、受光波形の位相差がさらに拡大します
@@ -52,6 +54,7 @@ params_ts.fs = fs;
 params_ts.enable_plot = true;            % 可視化を有効化
 params_ts.medium_extinction = 0.0;       % 空気中
 params_ts.refractive_index = 1.0;        % 空気中の屈折率 (水中なら 1.33)
+params_ts.initial_state = 'steady';      % 連続送信の定常状態 ('zero': t < 0 は無送信)
 
 % --- 送信アレイ (Tx) の配置・角度 (y軸上 x=0 に配置, ターゲット面に対し垂直 0 deg) ---
 params_ts.tx_array(1).pos          = [0.0,  0.50];
@@ -76,7 +79,8 @@ params_ts.rx_common.aperture_width = 0.01;      % 受光開口幅 10 mm
 params_ts.rx_common.fov_deg        = 45.0;      % 視野角 半角 45 deg
 params_ts.rx_common.responsivity   = 0.60;      % PD感度 0.6 A/W
 params_ts.rx_common.tia_gain       = 1.0e4;     % TIAゲイン 10 kOhm
-params_ts.rx_common.dc_block       = true;      % DCブロック有効
+params_ts.rx_common.hpf_cutoff     = 0.05e6;    % 低域遮断 0.05 MHz (C5658, AC結合)
+params_ts.rx_common.lpf_cutoff     = 1.0e9;     % 高域遮断 1 GHz (C5658)
 
 % --- 反射ターゲット仕様 (距離 2.0m, 長さ 1.8m) ---
 params_ts.target.distance    = 2.0;             % 正面距離 2.0 m
@@ -103,7 +107,7 @@ fprintf('--- [ケース 2] 静的DC光パワー解析 (DCブロック無効) ---
 
 x_static = [1.0; 0.8];
 params_static = params_ts;
-params_static.rx_common.dc_block = false;
+params_static.rx_common.hpf_cutoff = 0;        % DC解析のため HPF (AC結合) を無効化
 params_static.enable_plot = false;
 
 [y_static, H_elec_dc, ~, ~] = optical_mimo_simulation(x_static, params_static);

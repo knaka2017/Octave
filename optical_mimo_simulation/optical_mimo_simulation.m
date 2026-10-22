@@ -17,6 +17,14 @@
 %   - 光源 (Tx) / 受光器 (Rx): y 軸上 (x = 0) に配置
 %   - 反射ターゲット: x = D に位置する y 軸方向の線分（微小線素パッチ分割）
 %   - 空間光強度: 各座標 (x, y) における合成光パワー密度 [W/m]
+%
+% 【受光回路モデル】
+%   - 受光モジュール (APD + 内蔵アンプ) の帯域を 1次HPF (低域遮断 hpf_cutoff) と
+%     1次LPF (高域遮断 lpf_cutoff) で模擬 (例: 浜松ホトニクス C5658 = 0.05 MHz ～ 1 GHz)
+%   - params.initial_state により送受信の初期状態を選択
+%       'zero'  : t < 0 は無送信・受光回路は静止状態（光の到達遅延・点灯直後の過渡を観測）
+%       'steady': 入力 x を1周期として繰り返し送信している定常状態
+%                 （x の長さは信号周期の整数倍とすること）
 % =========================================================================
 
 function [y, H_elec, H_opt, info] = optical_mimo_simulation(x, params)
@@ -29,6 +37,11 @@ if nargin < 2 || isempty(params)
 params = default_params;
 else
 params = fill_missing_fields(params, default_params);
+end
+
+% 旧パラメータ dc_block との互換: dc_block = false が指定された場合は HPF を無効化
+if isfield(params.rx_common, 'dc_block') && ~params.rx_common.dc_block
+params.rx_common.hpf_cutoff = 0;
 end
 
 % ---------------------------------------------------------------------
@@ -83,19 +96,29 @@ H_elec = G_tia * R_resp * H_opt;
 % 6. 受光出力信号 y の算出（TOF伝搬遅延モデル対応）
 % ---------------------------------------------------------------------
 c_speed = 2.99792458e8 / params.refractive_index;
+is_steady = strcmpi(params.initial_state, 'steady');
 
 if num_samples > 1
-% 時系列信号: パッチごとの伝搬遅延を周波数領域伝達関数 H(f) で畳み込み
+% 時系列信号: パッチごとの伝搬遅延と受光回路の周波数特性を周波数領域伝達関数 H(f) で畳み込み
+%   steady: 巡回畳み込み（周期送信の定常状態）、HPF も定常応答として周波数領域で適用
+%   zero  : 線形畳み込み、HPF は時定数が解析区間より長いため時間領域の零初期状態 IIR で適用
 dH_elec_patches = G_tia * R_resp * patch_data.dH;
 tau_patches = patch_data.path_length / c_speed;
-y_raw = simulate_tof_propagation(x, dH_elec_patches, tau_patches, params.fs);
+y_rx = simulate_tof_propagation(x, dH_elec_patches, tau_patches, params.fs, ...
+params.rx_common, is_steady);
+if ~is_steady
+y_rx = apply_rx_highpass_zero_state(y_rx, params.rx_common.hpf_cutoff, params.fs);
+end
 else
 % 静的スナップショット: 遅延は位相に影響しないため実数行列の瞬時積
-y_raw = H_elec * x;
+% (DC解析のため、HPF 有効時は定常状態で DC 成分が遮断され出力 0)
+y_rx = H_elec * x;
+if params.rx_common.hpf_cutoff > 0
+y_rx = zeros(size(y_rx));
+end
 end
 
-y_blocked = apply_dc_block(y_raw, params.rx_common.dc_block);
-y = apply_channel_noise(y_blocked, params.noise_params);
+y = apply_channel_noise(y_rx, params.noise_params);
 
 % ---------------------------------------------------------------------
 % 7. チャネル解析情報の収集
@@ -128,6 +151,7 @@ function p = get_default_params()
 p.medium_extinction = 0.0;     % 消散係数 (0.0: 空気中, >0: 水中 [1/m])
 p.refractive_index = 1.0;      % 媒体屈折率 (空気中: 1.0, 純水: 1.33)
 p.fs = 1.0e9;                  % サンプリング周波数 [Hz] (1 GHz)
+p.initial_state = 'zero';      % 送受信の初期状態 ('zero': t<0 は無送信, 'steady': x の周期送信の定常状態)
 p.enable_plot = true;          % 可視化フラグ
 p.intensity_plot_scale = 'dB'; % 光強度分布図の表示スケール ('dB' または 'linear')
 p.intensity_db_range = 40.0;   % dB表示時のダイナミックレンジ [dB] (最大値からの表示下限)
@@ -159,7 +183,8 @@ p.rx_common.aperture_width = 0.01;         % 2D受光開口幅 [m] (10mm)
 p.rx_common.fov_deg = 45.0;                % 視野角 半角 [deg]
 p.rx_common.responsivity = 0.60;           % PD感度 [A/W]
 p.rx_common.tia_gain = 1.0e4;              % TIAゲイン [V/A]
-p.rx_common.dc_block = true;               % DCブロック有効化
+p.rx_common.hpf_cutoff = 0.05e6;           % 受光回路の低域遮断周波数 [Hz] (1次HPF, 0: 無効) C5658: 0.05 MHz
+p.rx_common.lpf_cutoff = 0;                % 受光回路の高域遮断周波数 [Hz] (1次LPF, 0: 無効) C5658: 1 GHz
 
 % 反射ターゲット (x = distance に置かれた y軸方向の線分壁)
 p.target.distance = 2.0;                   % x 軸距離 [m]
@@ -286,22 +311,31 @@ end
 
 % =========================================================================
 % 内部関数: TOF周波数領域伝達関数による時系列信号の厳密伝搬シミュレーション
+%   is_periodic = true : x を1周期とする周期送信の定常状態（巡回畳み込み、HPF も周波数領域で適用）
+%   is_periodic = false: t < 0 は無送信（ゼロパディングによる線形畳み込み、HPF は呼び出し側で適用）
 % =========================================================================
-function y_out = simulate_tof_propagation(x, dH_elec_patches, tau_patches, fs)
+function y_out = simulate_tof_propagation(x, dH_elec_patches, tau_patches, fs, rx_common, is_periodic)
 [M, num_samples] = size(x);
 N = size(dH_elec_patches, 1);
 
+if is_periodic
+n_pad = 0;
+else
 max_tau = max(tau_patches(:));
 n_pad = ceil(max_tau * fs) + 64;
+end
 n_fft = num_samples + n_pad;
 
 % 正の周波数ベクトル（DCからナイキスト周波数まで）
 num_pos = floor(n_fft / 2) + 1;
 f_pos = (0:(num_pos - 1)) * (fs / n_fft);
 
+% 受光回路の周波数特性（LPF、定常状態では HPF も含む）
+H_rx_half = eval_rx_frequency_response(f_pos, rx_common, is_periodic);
+
 y_out = zeros(N, num_samples);
 
-% 送信波形をゼロパディングしてFFT（線形畳み込み）
+% 送信波形をゼロパディングしてFFT（定常状態ではパディングなしの巡回畳み込み）
 X_fft = zeros(M, n_fft);
 for m = 1:M
 x_padded = [x(m, :), zeros(1, n_pad)];
@@ -316,7 +350,7 @@ tau_km = squeeze(tau_patches(n, m, :));         % [K x 1]
 
     % 各パッチの位相回転 exp(-j 2*pi*f*tau) を積分した伝達関数 H(f)
     phase_mat = -2.0 * pi * (tau_km * f_pos);       % [K x num_pos]
-    H_half = sum(repmat(dH_km, 1, num_pos) .* exp(1i * phase_mat), 1);
+    H_half = sum(repmat(dH_km, 1, num_pos) .* exp(1i * phase_mat), 1) .* H_rx_half;
 
     % エルミート対称性を持たせて全周波数ベクトルを構築
     H_full = zeros(1, n_fft);
@@ -362,20 +396,41 @@ end
 end
 
 % =========================================================================
-% 内部関数: DCブロック（AC結合）処理
+% 内部関数: 受光回路の周波数特性 (1次LPF・1次HPF のアナログ伝達関数)
+%   H_LPF(f) = 1 / (1 + j f / f_H),  H_HPF(f) = (j f / f_L) / (1 + j f / f_L)
 % =========================================================================
-function y_out = apply_dc_block(y_in, dc_block_enabled)
-if ~dc_block_enabled
+function H_rx = eval_rx_frequency_response(f, rx_common, include_hpf)
+H_rx = ones(size(f));
+
+f_H = rx_common.lpf_cutoff;
+if f_H > 0 && isfinite(f_H)
+H_rx = H_rx ./ (1 + 1i * f / f_H);
+end
+
+f_L = rx_common.hpf_cutoff;
+if include_hpf && f_L > 0
+jf = 1i * f / f_L;
+H_rx = H_rx .* (jf ./ (1 + jf));
+end
+end
+
+% =========================================================================
+% 内部関数: 受光回路 1次HPF（AC結合）の零初期状態応答
+%   t < 0 で回路が静止している状態から、因果的な IIR フィルタとして時間領域で適用。
+%   HPF の時定数 1/(2 pi f_L) は解析区間より十分長いため、周波数領域ではなく
+%   双一次変換（プリワーピング付き）による時間領域処理とする。
+% =========================================================================
+function y_out = apply_rx_highpass_zero_state(y_in, f_L, fs)
 y_out = y_in;
+if f_L <= 0
 return;
 end
 
-[~, num_samples] = size(y_in);
-if num_samples > 1
-dc_mean = mean(y_in, 2);
-y_out = y_in - repmat(dc_mean, 1, num_samples);
-else
-y_out = zeros(size(y_in));
+K = tan(pi * f_L / fs);
+b = [1, -1] / (1 + K);
+a = [1, (K - 1) / (1 + K)];
+for n = 1:size(y_in, 1)
+y_out(n, :) = filter(b, a, y_in(n, :));
 end
 end
 
@@ -579,15 +634,19 @@ end
 end
 
 % ---------------------------------------------------------------------
-% Figure 4: 送信信号波形（上段）および受信信号波形（下段）
+% Figure 4: 送信光パワー波形（上段）および受光モジュール出力電圧波形（下段）
 % ---------------------------------------------------------------------
-figure('Name', 'Optical MIMO 2D - Transmitted and Received Signals', ...
-'NumberTitle', 'off', 'Position', [650, 40, 600, 420]);
+figure('Name', 'Optical MIMO 2D - Transmitted Power and Photoreceiver Output', ...
+'NumberTitle', 'off', 'Position', [650, 40, 760, 560]);
 
-dc_status_str = 'Enabled';
-if ~params.rx_common.dc_block
-dc_status_str = 'Disabled';
+% 受光回路の帯域・初期状態の表示文字列
+if strcmpi(params.initial_state, 'steady')
+state_str = 'Steady State';
+else
+state_str = 'Zero Initial State';
 end
+rx_band_str = sprintf('f_L = %s, f_H = %s', ...
+format_freq_str(params.rx_common.hpf_cutoff), format_freq_str(params.rx_common.lpf_cutoff));
 
 if length(t) > 1
 t_max = max(t);
@@ -603,31 +662,39 @@ t_unit = 'ms';
 end
 t_disp = t * t_scale;
 
-% 上段: 送信光強度信号波形 x(t)
-subplot(2, 1, 1);
+% 上段: 送信光パワー波形 P_tx(t)
+ax_tx = subplot(2, 1, 1);
 hold on; grid on;
 for m = 1:M
     plot(t_disp, X(m, :), 'LineWidth', 1.5, 'Color', colors_tx(m, :), ...
-        'DisplayName', sprintf('Tx #%d Input Power', m));
+        'DisplayName', sprintf('Tx #%d Optical Power', m));
 end
 xlabel(sprintf('Time [%s]', t_unit));
 ylabel('Optical Power [W]');
 xlim([0, max(t_disp)]);
-title('Transmitted Optical Power Waveforms x(t)');
-legend('Location', 'northeast');
+title('Transmitted Optical Power P_{tx}(t)');
+legend('Location', 'northeastoutside');
 
-% 下段: 受光出力電圧信号波形 y(t)
-subplot(2, 1, 2);
+% 下段: 受光モジュール出力電圧波形 v_out(t)
+ax_rx = subplot(2, 1, 2);
 hold on; grid on;
 for n = 1:N
     plot(t_disp, Y(n, :), 'LineWidth', 1.5, 'Color', colors_rx(n, :), ...
-        'DisplayName', sprintf('Rx #%d Output Voltage', n));
+        'DisplayName', sprintf('Rx #%d Photoreceiver Output', n));
 end
 xlabel(sprintf('Time [%s]', t_unit));
 ylabel('Output Voltage [V]');
 xlim([0, max(t_disp)]);
-title(sprintf('Received Output Voltage Waveforms y(t) (DC Block: %s, TOF-mode)', dc_status_str));
-legend('Location', 'northeast');
+title({'Photoreceiver Output Voltage v_{out}(t)', sprintf('(%s, %s)', rx_band_str, state_str)});
+legend('Location', 'northeastoutside');
+
+% 凡例を軸の外に置いた上で、上下の時間軸の幅をそろえる
+drawnow;
+pos_tx = get(ax_tx, 'Position');
+pos_rx = get(ax_rx, 'Position');
+ax_width = min(pos_tx(3), pos_rx(3));
+set(ax_tx, 'Position', [pos_tx(1), pos_tx(2), ax_width, pos_tx(4)]);
+set(ax_rx, 'Position', [pos_rx(1), pos_rx(2), ax_width, pos_rx(4)]);
 
 
 else
@@ -637,7 +704,7 @@ xlabel('Transmitter Tx (m)');
 ylabel('Optical Power [W]');
 set(gca, 'XTick', 1:M);
 set(gca, 'XTickLabel', arrayfun(@(i) sprintf('Tx #%d', i), 1:M, 'UniformOutput', false));
-title('Transmitted Static Optical Power x');
+title('Transmitted Static Optical Power P_{tx}');
 
 subplot(2, 1, 2);
 bar(1:N, Y, 'FaceColor', [0.2, 0.5, 0.8]);
@@ -645,7 +712,7 @@ xlabel('Receiver Rx (n)');
 ylabel('Output Voltage [V]');
 set(gca, 'XTick', 1:N);
 set(gca, 'XTickLabel', arrayfun(@(i) sprintf('Rx #%d', i), 1:N, 'UniformOutput', false));
-title(sprintf('Received Static Output Voltage y (DC Block: %s)', dc_status_str));
+title({'Photoreceiver Static Output Voltage v_{out}', sprintf('(%s, DC Analysis)', rx_band_str)});
 
 
 end
@@ -690,4 +757,21 @@ plot([p0(1), tip(1)], [p0(2), tip(2)], 'Color', color, 'LineStyle', line_style, 
 'LineWidth', line_width, 'HandleVisibility', 'off');
 plot([w1(1), tip(1), w2(1)], [w1(2), tip(2), w2(2)], 'Color', color, 'LineStyle', '-', ...
 'LineWidth', line_width, 'HandleVisibility', 'off');
+end
+
+% =========================================================================
+% 内部関数: 周波数の表示用文字列 (0 以下・非有限は 'Off')
+% =========================================================================
+function s = format_freq_str(f)
+if ~(f > 0) || ~isfinite(f)
+s = 'Off';
+elseif f >= 1e9
+s = sprintf('%g GHz', f / 1e9);
+elseif f >= 1e6
+s = sprintf('%g MHz', f / 1e6);
+elseif f >= 1e3
+s = sprintf('%g kHz', f / 1e3);
+else
+s = sprintf('%g Hz', f);
+end
 end

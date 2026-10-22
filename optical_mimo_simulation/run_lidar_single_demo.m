@@ -53,6 +53,7 @@ params_ts.fs = fs;
 params_ts.enable_plot = true;            % 可視化を有効化
 params_ts.medium_extinction = 0.0;       % 空気中
 params_ts.refractive_index = n_medium;   % 媒体屈折率
+params_ts.initial_state = 'zero';        % 単発パルス: t < 0 は無送信・受光回路は静止状態
 
 % --- 送信光源 (Tx) の配置・角度 (y軸上 x=0 に配置, ターゲット面に対し垂直 0 deg) ---
 params_ts.tx_array(1).pos          = [0.0,  0.50];
@@ -72,7 +73,8 @@ params_ts.rx_common.aperture_width = 0.01;      % 受光開口幅 10 mm
 params_ts.rx_common.fov_deg        = 45.0;      % 視野角 半角 45 deg
 params_ts.rx_common.responsivity   = 0.60;      % PD感度 0.6 A/W
 params_ts.rx_common.tia_gain       = 1.0e4;     % TIAゲイン 10 kOhm
-params_ts.rx_common.dc_block       = false;     % パルス波形を保持するため DCブロック無効
+params_ts.rx_common.hpf_cutoff     = 0.05e6;    % 低域遮断 0.05 MHz (C5658, AC結合)
+params_ts.rx_common.lpf_cutoff     = 1.0e9;     % 高域遮断 1 GHz (C5658)
 
 % --- 反射ターゲット仕様 (距離 9.0m, 長さ 1.8m) ---
 params_ts.target.distance    = target_distance; % 正面距離 9.0 m
@@ -94,6 +96,13 @@ fprintf('     ・行列のランク (Rank)              : %d\n\n', info_ts.rank)
 % 7. 受光パルスのピーク時刻による TOF・距離推定
 c_medium = c0 / n_medium;
 num_rx = size(y_ts, 1);
+
+% 受光回路 1次LPF の群遅延 1/(2 pi f_H)（パルス帯域 << f_H での近似）
+if params_ts.rx_common.lpf_cutoff > 0
+tau_rx = 1 / (2 * pi * params_ts.rx_common.lpf_cutoff);
+else
+tau_rx = 0;
+end
 
 fprintf('  -> パルスTOF解析 (発射時刻 t_fire = %.2f ns):\n', t_fire * 1e9);
 for n = 1:num_rx
@@ -124,9 +133,10 @@ end
 tof_meas = t_peak - t_fire;
 
 fprintf('     ・Rx #%d: ピーク電圧 %.3e V\n', n, max(y_ts(n, :)));
-fprintf('              TOF 理論値 %.3f ns (往復光路長 %.3f m)\n', tof_theory * 1e9, path_mean);
-fprintf('              TOF 実測値 %.3f ns -> 推定距離 (片道換算) %.3f m\n', ...
-    tof_meas * 1e9, c_medium * tof_meas / 2);
+fprintf('              TOF 理論値 %.3f ns (往復光路長 %.3f m: %.3f ns + 受光回路群遅延 %.3f ns)\n', ...
+    (tof_theory + tau_rx) * 1e9, path_mean, tof_theory * 1e9, tau_rx * 1e9);
+fprintf('              TOF 実測値 %.3f ns -> 推定距離 (片道換算, 受光回路遅延補正後) %.3f m\n', ...
+    tof_meas * 1e9, c_medium * (tof_meas - tau_rx) / 2);
 
 
 end
@@ -139,7 +149,7 @@ fprintf('--- [ケース 2] 静的DC光パワー解析 (DCブロック無効) ---
 
 x_static = 1.0;
 params_static = params_ts;
-params_static.rx_common.dc_block = false;
+params_static.rx_common.hpf_cutoff = 0;        % DC解析のため HPF (AC結合) を無効化
 params_static.enable_plot = false;
 
 [y_static, H_elec_dc, ~, ~] = optical_mimo_simulation(x_static, params_static);

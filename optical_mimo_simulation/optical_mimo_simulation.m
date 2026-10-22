@@ -129,6 +129,8 @@ p.medium_extinction = 0.0;     % 消散係数 (0.0: 空気中, >0: 水中 [1/m])
 p.refractive_index = 1.0;      % 媒体屈折率 (空気中: 1.0, 純水: 1.33)
 p.fs = 1.0e9;                  % サンプリング周波数 [Hz] (1 GHz)
 p.enable_plot = true;          % 可視化フラグ
+p.intensity_plot_scale = 'dB'; % 光強度分布図の表示スケール ('dB' または 'linear')
+p.intensity_db_range = 40.0;   % dB表示時のダイナミックレンジ [dB] (最大値からの表示下限)
 
 % 送信アレイ (Tx: x=0 の y軸上に配置, ターゲット平板に対し垂直 0 deg)
 % Tx #1: (0, 0.50) [m]
@@ -336,18 +338,25 @@ end
 
 % =========================================================================
 % 内部関数: 2次元放射パターン評価 (LED / LD)
+%   戻り値 R(alpha) [1/rad] は -90 ～ +90 deg の角度積分が 1 となるよう正規化。
+%   送信光パワー P [W] に対する放射強度は P * R(alpha) [W/rad] となる。
 % =========================================================================
 function R = eval_tx_radiation_2d(alpha_deg, fwhm_deg, type)
 if strcmpi(type, 'LED')
 cos_half = cosd(min(fwhm_deg / 2.0, 89.0));
 m_order = -log(2.0) / log(cos_half);
+% 正規化積分: int_{-pi/2}^{pi/2} cos^m(a) da = sqrt(pi) * Gamma((m+1)/2) / Gamma(m/2+1)
+norm_int = sqrt(pi) * exp(gammaln((m_order + 1) / 2) - gammaln(m_order / 2 + 1));
 rad = alpha_deg * (pi / 180.0);
 R = zeros(size(alpha_deg));
 valid = abs(alpha_deg) <= 90.0;
-R(valid) = ((m_order + 1) / 2.0) * (cos(rad(valid)).^m_order);
+R(valid) = (cos(rad(valid)).^m_order) / norm_int;
 else
 sigma = (fwhm_deg / 2.0) / sqrt(2 * log(2));
-R = exp(-0.5 * (alpha_deg ./ sigma).^2);
+% 正規化積分: int_{-pi/2}^{pi/2} exp(-a^2 / (2 sigma^2)) da
+sigma_rad = sigma * (pi / 180.0);
+norm_int = sqrt(2 * pi) * sigma_rad * erf((pi / 2) / (sqrt(2) * sigma_rad));
+R = exp(-0.5 * (alpha_deg ./ sigma).^2) / norm_int;
 R(abs(alpha_deg) > 90.0) = 0.0;
 end
 end
@@ -406,59 +415,70 @@ D_target = target.p(1, 1);
 y_min_t  = min(target.p(:, 2));
 y_max_t  = max(target.p(:, 2));
 
+% 表示範囲: ターゲット・Tx・Rx の y 座標をすべて含み、距離 D に応じた余白を付加
+y_all = [y_min_t, y_max_t, ...
+arrayfun(@(s) s.pos(2), params.tx_array), ...
+arrayfun(@(s) s.pos(2), params.rx_array)];
+y_margin = 0.15 * max(max(y_all) - min(y_all), 0.05 * D_target);
+y_lim_plot = [min(y_all) - y_margin, max(y_all) + y_margin];
+x_margin = 0.05 * D_target;
+
 % ---------------------------------------------------------------------
 % Figure 1: 2D幾何配置図 (2D Geometry Layout)
+%   距離 D と y 方向の広がりの比が大きくても潰れないよう axis equal は使わない
+%   (矢印は実際の指向方向を示すが、x と y の縮尺は一致しない)
 % ---------------------------------------------------------------------
 figure('Name', 'Optical MIMO 2D - Geometry Layout', ...
 'NumberTitle', 'off', 'Position', [50, 480, 580, 420]);
-hold on; grid on; axis equal;
+hold on; grid on;
 xlabel('x-axis (Propagation Direction) [m]');
 ylabel('y-axis (Array Axis) [m]');
 title('2D Geometry Layout (Tx/Rx on y-axis, Target at x=D)');
 
 plot([D_target, D_target], [y_min_t, y_max_t], 'k-', 'LineWidth', 4.0, 'DisplayName', 'Target Line');
 
-len_arrow_tx = 0.60;   % Tx 矢印幹の長さ [m]
-len_arrow_rx = 0.50;   % Rx 矢印幹の長さ [m]
+len_arrow_tx = 0.30 * D_target;   % Tx 矢印幹の長さ [m] (ターゲット距離に比例)
+len_arrow_rx = 0.25 * D_target;   % Rx 矢印幹の長さ [m] (ターゲット距離に比例)
 
 for m = 1:M
 pos = params.tx_array(m).pos;
 theta = params.tx_array(m).pointing_deg;
-v_dir = [cosd(theta), sind(theta)];
 plot(pos(1), pos(2), '^', 'MarkerSize', 9, ...
 'MarkerFaceColor', colors_tx(m, :), 'Color', 'k', ...
 'DisplayName', sprintf('Tx #%d (%s, %+.0f deg)', m, params.tx_array(m).type, theta));
-
-quiver(pos(1), pos(2), v_dir(1)*len_arrow_tx, v_dir(2)*len_arrow_tx, 0, ...
-    'Color', colors_tx(m, :), 'LineWidth', 1.8, 'MaxHeadSize', 0.28, 'HandleVisibility', 'off');
-
-
 end
 
 for n = 1:N
 pos = params.rx_array(n).pos;
 theta = params.rx_array(n).pointing_deg;
-v_dir = [cosd(theta), sind(theta)];
 plot(pos(1), pos(2), 'o', 'MarkerSize', 8, ...
 'MarkerFaceColor', colors_rx(n, :), 'Color', 'k', ...
 'DisplayName', sprintf('Rx #%d (%+.0f deg)', n, theta));
-
-% Rx 矢印: 粗い破線 ('--') から細かく密なドット点線 (':') に変更
-quiver(pos(1), pos(2), v_dir(1)*len_arrow_rx, v_dir(2)*len_arrow_rx, 0, ...
-    'Color', colors_rx(n, :), 'LineWidth', 1.5, 'LineStyle', ':', 'MaxHeadSize', 0.28, 'HandleVisibility', 'off');
-
-
 end
 legend('Location', 'northeastoutside');
-xlim([-0.2, D_target + 0.3]);
-ylim([min(y_min_t, -0.6) - 0.2, max(y_max_t, 0.6) + 0.2]);
+xlim([-x_margin, D_target + x_margin]);
+ylim(y_lim_plot);
+
+% 矢印は凡例・表示範囲の確定後に描画（矢じりの形状を画面上で一定に保つため）
+for m = 1:M
+theta = params.tx_array(m).pointing_deg;
+draw_pointing_arrow_2d(params.tx_array(m).pos, [cosd(theta), sind(theta)], len_arrow_tx, ...
+    colors_tx(m, :), '-', 1.8);
+end
+
+for n = 1:N
+% Rx 矢印: 細かく密なドット点線 (':')
+theta = params.rx_array(n).pointing_deg;
+draw_pointing_arrow_2d(params.rx_array(n).pos, [cosd(theta), sind(theta)], len_arrow_rx, ...
+    colors_rx(n, :), ':', 1.5);
+end
 
 % ---------------------------------------------------------------------
 % Figure 2: 空間 (x, y) における合成光強度分布ヒートマップ
 % ---------------------------------------------------------------------
 figure('Name', 'Optical MIMO 2D - Optical Intensity Distribution', ...
 'NumberTitle', 'off', 'Position', [650, 480, 600, 420]);
-hold on; grid on; axis equal;
+hold on; grid on;
 
 num_samples = size(X, 2);
 if num_samples > 1
@@ -470,7 +490,7 @@ weight_mode_str = 'Static Power';
 end
 
 gx = linspace(0.01, D_target, 80);
-gy = linspace(min(y_min_t, -0.6) - 0.2, max(y_max_t, 0.6) + 0.2, 80);
+gy = linspace(y_lim_plot(1), y_lim_plot(2), 80);
 [GX, GY] = meshgrid(gx, gy);
 field_intensity = zeros(size(GX));
 
@@ -490,19 +510,41 @@ field_intensity = field_intensity + ...
 
 end
 
-contourf(GX, GY, field_intensity, 25, 'LineStyle', 'none');
+use_db = strcmpi(params.intensity_plot_scale, 'dB');
+if use_db
+% dB表示: 最大値から intensity_db_range [dB] 下までを表示範囲とする
+I_max = max(field_intensity(:));
+if I_max <= 0
+    I_max = 1e-30;
+end
+db_top = 10 * log10(I_max);
+db_floor = db_top - params.intensity_db_range;
+field_plot = 10 * log10(max(field_intensity, 10^(db_floor / 10)));
+cb_label_str = 'Optical Power Density [dB(W/m)]';
+scale_str = 'dB';
+else
+field_plot = field_intensity;
+cb_label_str = 'Optical Power Density [W/m]';
+scale_str = 'Linear';
+end
+
+contourf(GX, GY, field_plot, 25, 'LineStyle', 'none');
 h_cb_field = colorbar;
-ylabel(h_cb_field, 'Optical Power Density [W/m]');
+ylabel(h_cb_field, cb_label_str);
+if use_db
+caxis([db_floor, db_top]);
+end
 try
 colormap(gca, 'copper');
 catch
 colormap('copper');
 end
 plot([D_target, D_target], [y_min_t, y_max_t], 'c-', 'LineWidth', 3.0);
-title(sprintf('Combined Optical Intensity Distribution (%s)', weight_mode_str));
+title(sprintf('Combined Optical Intensity Distribution (%s, %s)', weight_mode_str, scale_str));
 xlabel('x-axis (Propagation Direction) [m]');
 ylabel('y-axis (Array Axis) [m]');
-xlim([-0.1, D_target + 0.2]);
+xlim([-x_margin, D_target + x_margin]);
+ylim(y_lim_plot);
 
 % ---------------------------------------------------------------------
 % Figure 3: 電気チャネル行列 H_elec ヒートマップ (DC極限)
@@ -610,3 +652,42 @@ end
 
 end
 
+% =========================================================================
+% 内部関数: 指向方向矢印の描画（x, y の縮尺が異なる軸でも矢じり形状を一定に保つ）
+%   矢印の幹はデータ座標上の実際の指向方向に描き、矢じりは画面ピクセル座標で
+%   一定の大きさ・開き角となるよう計算してデータ座標に戻す。
+% =========================================================================
+function draw_pointing_arrow_2d(p0, v_dir, len, color, line_style, line_width)
+p0 = p0(1:2);
+tip = p0 + len * v_dir;
+
+% 現在の軸における 1 ピクセルあたりのデータ量 [m/px]
+drawnow;
+ax = gca;
+old_units = get(ax, 'Units');
+set(ax, 'Units', 'pixels');
+ax_pos = get(ax, 'Position');
+set(ax, 'Units', old_units);
+x_lim = get(ax, 'XLim');
+y_lim = get(ax, 'YLim');
+s_px = [diff(x_lim) / ax_pos(3), diff(y_lim) / ax_pos(4)];
+
+% 矢印をピクセル座標に変換し、矢じりの2辺を求める
+d_px = (tip - p0) ./ s_px;
+L_px = norm(d_px);
+if L_px <= 0
+return;
+end
+u_px = d_px / L_px;
+head_px = min(12.0, 0.35 * L_px);      % 矢じりの長さ [px]
+head_ang = 25.0;                        % 矢じりの開き半角 [deg]
+rot_p = [cosd(head_ang), -sind(head_ang); sind(head_ang), cosd(head_ang)];
+rot_m = rot_p.';
+w1 = tip - head_px * (rot_p * u_px.').' .* s_px;
+w2 = tip - head_px * (rot_m * u_px.').' .* s_px;
+
+plot([p0(1), tip(1)], [p0(2), tip(2)], 'Color', color, 'LineStyle', line_style, ...
+'LineWidth', line_width, 'HandleVisibility', 'off');
+plot([w1(1), tip(1), w2(1)], [w1(2), tip(2), w2(2)], 'Color', color, 'LineStyle', '-', ...
+'LineWidth', line_width, 'HandleVisibility', 'off');
+end

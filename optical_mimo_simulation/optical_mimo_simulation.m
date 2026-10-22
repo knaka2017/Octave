@@ -25,6 +25,11 @@
 %       'zero'  : t < 0 は無送信・受光回路は静止状態（光の到達遅延・点灯直後の過渡を観測）
 %       'steady': 入力 x を1周期として繰り返し送信している定常状態
 %                 （x の長さは信号周期の整数倍とすること）
+%   - 信号経路: x(t) [W] -> 光チャネル -> P_rx(t) [W] (info.P_rx) -> R * G -> HPF/LPF
+%               -> v_signal(t) [V] (info.v_signal) -> 受光器雑音 -> y(t) [V]
+%   - 雑音 (noise_params.model = 'fixed'): 光入力換算の固定雑音 input_noise_rms [W rms]
+%     (例: C5658 = -48 dBm = 16 nW rms)。受光光パワーが減衰すると SNR が低下する
+%   - 受光光パワーが 1 dB 圧縮点 (rx_common.compression_power) を超えると警告（飽和は模擬しない）
 % =========================================================================
 
 function [y, H_elec, H_opt, info] = optical_mimo_simulation(x, params)
@@ -93,7 +98,9 @@ R_resp = params.rx_common.responsivity;
 H_elec = G_tia * R_resp * H_opt;
 
 % ---------------------------------------------------------------------
-% 6. 受光出力信号 y の算出（TOF伝搬遅延モデル対応）
+% 6. 受光光パワー P_rx および受光モジュール出力 y の算出（TOF伝搬遅延モデル対応）
+%    光チャネル: x(t) [W] -> P_rx(t) [W]（受光器入力）
+%    受光回路  : P_rx(t) -> 光電変換 (R * G) -> HPF/LPF -> v_signal(t) [V] -> 雑音付加 -> y(t) [V]
 % ---------------------------------------------------------------------
 c_speed = 2.99792458e8 / params.refractive_index;
 is_steady = strcmpi(params.initial_state, 'steady');
@@ -102,23 +109,37 @@ if num_samples > 1
 % 時系列信号: パッチごとの伝搬遅延と受光回路の周波数特性を周波数領域伝達関数 H(f) で畳み込み
 %   steady: 巡回畳み込み（周期送信の定常状態）、HPF も定常応答として周波数領域で適用
 %   zero  : 線形畳み込み、HPF は時定数が解析区間より長いため時間領域の零初期状態 IIR で適用
-dH_elec_patches = G_tia * R_resp * patch_data.dH;
 tau_patches = patch_data.path_length / c_speed;
-y_rx = simulate_tof_propagation(x, dH_elec_patches, tau_patches, params.fs, ...
+[P_rx, P_rx_filt] = simulate_tof_propagation(x, patch_data.dH, tau_patches, params.fs, ...
 params.rx_common, is_steady);
+v_signal = G_tia * R_resp * P_rx_filt;
 if ~is_steady
-y_rx = apply_rx_highpass_zero_state(y_rx, params.rx_common.hpf_cutoff, params.fs);
+v_signal = apply_rx_highpass_zero_state(v_signal, params.rx_common.hpf_cutoff, params.fs);
 end
 else
 % 静的スナップショット: 遅延は位相に影響しないため実数行列の瞬時積
 % (DC解析のため、HPF 有効時は定常状態で DC 成分が遮断され出力 0)
-y_rx = H_elec * x;
+P_rx = H_opt * x;
+v_signal = H_elec * x;
 if params.rx_common.hpf_cutoff > 0
-y_rx = zeros(size(y_rx));
+v_signal = zeros(size(v_signal));
 end
 end
 
-y = apply_channel_noise(y_rx, params.noise_params);
+[y, noise_rms_v] = apply_receiver_noise(v_signal, params.noise_params, params.rx_common, params.fs);
+
+% 受光光パワーが 1 dB 圧縮点を超える場合は警告（飽和特性は模擬しない）
+P_rx_peak = max(P_rx, [], 2);
+P_comp = params.rx_common.compression_power;
+is_compressed = false(size(P_rx_peak));
+if P_comp > 0
+is_compressed = P_rx_peak > P_comp;
+for n = find(is_compressed(:).')
+warning('optical_mimo_simulation:compression', ...
+    'Rx #%d: 受光光パワーのピーク %.3g W が 1 dB 圧縮点 %.3g W を超えています（飽和は模擬していません）', ...
+    n, P_rx_peak(n), P_comp);
+end
+end
 
 % ---------------------------------------------------------------------
 % 7. チャネル解析情報の収集
@@ -134,12 +155,22 @@ info.H_optical = H_opt;
 info.H_electrical = H_elec;
 info.time_vector = t_vec;
 info.patch_data = patch_data;
+info.P_rx = P_rx;                          % 受光器入力の光パワー [W] (N x サンプル数)
+info.P_rx_peak = P_rx_peak;                % 受光光パワーのピーク [W] (N x 1)
+info.is_compressed = is_compressed;        % 1 dB 圧縮点の超過 (N x 1)
+info.v_signal = v_signal;                  % 雑音付加前の受光モジュール出力 [V]
+info.noise_rms_v = noise_rms_v;            % 出力換算の雑音 rms [V] (雑音無効時は 0)
+if noise_rms_v > 0
+info.snr_peak_db = 20 * log10(max(abs(v_signal), [], 2) / noise_rms_v);   % ピーク SNR [dB] (N x 1)
+else
+info.snr_peak_db = Inf(size(v_signal, 1), 1);
+end
 
 % ---------------------------------------------------------------------
 % 8. 可視化レンダリング（enable_plot が true の場合のみ実行）
 % ---------------------------------------------------------------------
 if isfield(params, 'enable_plot') && params.enable_plot
-render_simulation_visuals_2d(params, target_geo, H_elec, x, y, t_vec, cond_num);
+render_simulation_visuals_2d(params, target_geo, H_elec, x, P_rx, y, t_vec, cond_num);
 end
 
 end
@@ -185,6 +216,7 @@ p.rx_common.responsivity = 0.60;           % PD感度 [A/W]
 p.rx_common.tia_gain = 1.0e4;              % TIAゲイン [V/A]
 p.rx_common.hpf_cutoff = 0.05e6;           % 受光回路の低域遮断周波数 [Hz] (1次HPF, 0: 無効) C5658: 0.05 MHz
 p.rx_common.lpf_cutoff = 0;                % 受光回路の高域遮断周波数 [Hz] (1次LPF, 0: 無効) C5658: 1 GHz
+p.rx_common.compression_power = 0;         % 1 dB 圧縮点の光入力パワー [W] (超過時は警告のみ, 0: 判定しない) C5658: 3 uW
 
 % 反射ターゲット (x = distance に置かれた y軸方向の線分壁)
 p.target.distance = 2.0;                   % x 軸距離 [m]
@@ -194,7 +226,10 @@ p.target.reflectance = 0.80;               % 拡散反射率 (rho = 0.8)
 
 % ノイズ設定
 p.noise_params.enable = false;
-p.noise_params.snr_db = 30.0;
+p.noise_params.model = 'fixed';            % 'fixed': 受光器の固定雑音 (光入力換算), 'snr': 信号に対する SNR 一定
+p.noise_params.input_noise_rms = 16e-9;    % 光入力換算の雑音 rms [W] (受光回路帯域内) C5658: -48 dBm (16 nW rms)
+p.noise_params.snr_db = 30.0;              % model = 'snr' のときの SNR [dB]
+p.noise_params.seed = [];                  % 乱数シード ([]: 固定しない)
 end
 
 % =========================================================================
@@ -311,12 +346,15 @@ end
 
 % =========================================================================
 % 内部関数: TOF周波数領域伝達関数による時系列信号の厳密伝搬シミュレーション
-%   is_periodic = true : x を1周期とする周期送信の定常状態（巡回畳み込み、HPF も周波数領域で適用）
-%   is_periodic = false: t < 0 は無送信（ゼロパディングによる線形畳み込み、HPF は呼び出し側で適用）
+%   P_rx      : 受光器に到達する光パワー [W]（光チャネルのみ、受光回路の特性を含まない）
+%   P_rx_filt : P_rx に受光回路の周波数特性を適用したもの [W]
+%               (LPF、定常状態では HPF も含む。零初期状態の HPF は呼び出し側で適用)
+%   is_periodic = true : x を1周期とする周期送信の定常状態（巡回畳み込み）
+%   is_periodic = false: t < 0 は無送信（ゼロパディングによる線形畳み込み）
 % =========================================================================
-function y_out = simulate_tof_propagation(x, dH_elec_patches, tau_patches, fs, rx_common, is_periodic)
+function [P_rx, P_rx_filt] = simulate_tof_propagation(x, dH_patches, tau_patches, fs, rx_common, is_periodic)
 [M, num_samples] = size(x);
-N = size(dH_elec_patches, 1);
+N = size(dH_patches, 1);
 
 if is_periodic
 n_pad = 0;
@@ -331,9 +369,10 @@ num_pos = floor(n_fft / 2) + 1;
 f_pos = (0:(num_pos - 1)) * (fs / n_fft);
 
 % 受光回路の周波数特性（LPF、定常状態では HPF も含む）
-H_rx_half = eval_rx_frequency_response(f_pos, rx_common, is_periodic);
+H_rx_full = hermitian_full_spectrum(eval_rx_frequency_response(f_pos, rx_common, is_periodic), n_fft);
 
-y_out = zeros(N, num_samples);
+P_rx = zeros(N, num_samples);
+P_rx_filt = zeros(N, num_samples);
 
 % 送信波形をゼロパディングしてFFT（定常状態ではパディングなしの巡回畳み込み）
 X_fft = zeros(M, n_fft);
@@ -345,28 +384,35 @@ end
 for n = 1:N
 Y_fft_n = zeros(1, n_fft);
 for m = 1:M
-dH_km = squeeze(dH_elec_patches(n, m, :));     % [K x 1]
+dH_km = squeeze(dH_patches(n, m, :));          % [K x 1]
 tau_km = squeeze(tau_patches(n, m, :));         % [K x 1]
 
     % 各パッチの位相回転 exp(-j 2*pi*f*tau) を積分した伝達関数 H(f)
     phase_mat = -2.0 * pi * (tau_km * f_pos);       % [K x num_pos]
-    H_half = sum(repmat(dH_km, 1, num_pos) .* exp(1i * phase_mat), 1) .* H_rx_half;
+    H_half = sum(repmat(dH_km, 1, num_pos) .* exp(1i * phase_mat), 1);
 
-    % エルミート対称性を持たせて全周波数ベクトルを構築
-    H_full = zeros(1, n_fft);
-    H_full(1:num_pos) = H_half;
-    if mod(n_fft, 2) == 0
-        H_full((num_pos + 1):n_fft) = conj(H_half(end-1:-1:2));
-    else
-        H_full((num_pos + 1):n_fft) = conj(H_half(end:-1:2));
-    end
-
-    Y_fft_n = Y_fft_n + X_fft(m, :) .* H_full;
+    Y_fft_n = Y_fft_n + X_fft(m, :) .* hermitian_full_spectrum(H_half, n_fft);
 end
-y_time = real(ifft(Y_fft_n));
-y_out(n, :) = y_time(1:num_samples);
+p_time = real(ifft(Y_fft_n));
+P_rx(n, :) = p_time(1:num_samples);
+p_time = real(ifft(Y_fft_n .* H_rx_full));
+P_rx_filt(n, :) = p_time(1:num_samples);
 
 
+end
+end
+
+% =========================================================================
+% 内部関数: 正の周波数成分 (DC ～ ナイキスト) からエルミート対称な全周波数ベクトルを構築
+% =========================================================================
+function H_full = hermitian_full_spectrum(H_half, n_fft)
+num_pos = floor(n_fft / 2) + 1;
+H_full = zeros(1, n_fft);
+H_full(1:num_pos) = H_half;
+if mod(n_fft, 2) == 0
+H_full((num_pos + 1):n_fft) = conj(H_half(end-1:-1:2));
+else
+H_full((num_pos + 1):n_fft) = conj(H_half(end:-1:2));
 end
 end
 
@@ -435,31 +481,56 @@ end
 end
 
 % =========================================================================
-% 内部関数: チャネル雑音の付加
+% 内部関数: 受光器雑音の付加
+%   model = 'fixed': 受光器の固定雑音（光入力換算 input_noise_rms [W rms]）。
+%                    白色ガウス雑音を受光回路の HPF/LPF で帯域制限した後、出力換算の
+%                    rms が input_noise_rms * (R * G) となるようスケーリングして加える。
+%                    雑音レベルは信号に依存しないため、受光光パワーの減衰に応じて SNR が低下する。
+%   model = 'snr'  : 出力信号の平均電力に対して snr_db [dB] となる白色雑音（従来モデル）
+%   戻り値 noise_rms_v: 出力換算の雑音 rms [V]（雑音無効時は 0）
 % =========================================================================
-function y_out = apply_channel_noise(y_in, noise_params)
-if ~isfield(noise_params, 'enable') || ~noise_params.enable
+function [y_out, noise_rms_v] = apply_receiver_noise(y_in, noise_params, rx_common, fs)
 y_out = y_in;
+noise_rms_v = 0;
+if ~isfield(noise_params, 'enable') || ~noise_params.enable
 return;
 end
 
-y_out = y_in;
-if isfield(noise_params, 'snr_db')
+if ~isempty(noise_params.seed)
+rng(noise_params.seed);
+end
+
+[N, num_samples] = size(y_in);
+if strcmpi(noise_params.model, 'snr')
 snr_linear = 10^(noise_params.snr_db / 10);
 sig_power = mean(y_in(:).^2);
 if sig_power <= 0
-sig_power = 1.0;
+    sig_power = 1.0;
 end
-noise_var = sig_power / max(snr_linear, 1e-12);
-noise = sqrt(noise_var) * randn(size(y_in));
-y_out = y_out + noise;
+noise_rms_v = sqrt(sig_power / max(snr_linear, 1e-12));
+y_out = y_in + noise_rms_v * randn(size(y_in));
+return;
 end
+
+noise_rms_v = noise_params.input_noise_rms * rx_common.responsivity * rx_common.tia_gain;
+if num_samples > 1
+% 定常な雑音のため、受光回路の HPF/LPF を定常応答として周波数領域で適用
+num_pos = floor(num_samples / 2) + 1;
+f_pos = (0:(num_pos - 1)) * (fs / num_samples);
+H_rx_full = hermitian_full_spectrum(eval_rx_frequency_response(f_pos, rx_common, true), num_samples);
+shaped = real(ifft(fft(randn(N, num_samples), [], 2) .* repmat(H_rx_full, N, 1), [], 2));
+% 単位分散の白色雑音に対するフィルタ出力の rms で正規化（Parseval）
+noise = shaped / sqrt(mean(abs(H_rx_full).^2)) * noise_rms_v;
+else
+noise = noise_rms_v * randn(N, 1);
+end
+y_out = y_in + noise;
 end
 
 % =========================================================================
 % 内部関数: 2次元可視化レンダリング（1グラフ1Figure、波形は上下1Figure）
 % =========================================================================
-function render_simulation_visuals_2d(params, target, H_elec, X, Y, t, cond_num)
+function render_simulation_visuals_2d(params, target, H_elec, X, P_rx, Y, t, cond_num)
 M = length(params.tx_array);
 N = length(params.rx_array);
 
@@ -634,12 +705,12 @@ end
 end
 
 % ---------------------------------------------------------------------
-% Figure 4: 送信光パワー波形（上段）および受光モジュール出力電圧波形（下段）
+% Figure 4: 送信光パワー波形（上段）、受光光パワー波形（中段）、受光モジュール出力電圧波形（下段）
 % ---------------------------------------------------------------------
-figure('Name', 'Optical MIMO 2D - Transmitted Power and Photoreceiver Output', ...
-'NumberTitle', 'off', 'Position', [650, 40, 760, 560]);
+figure('Name', 'Optical MIMO 2D - Transmitted Power, Received Power and Photoreceiver Output', ...
+'NumberTitle', 'off', 'Position', [650, 40, 760, 720]);
 
-% 受光回路の帯域・初期状態の表示文字列
+% 受光回路の帯域・初期状態・雑音の表示文字列
 if strcmpi(params.initial_state, 'steady')
 state_str = 'Steady State';
 else
@@ -647,6 +718,17 @@ state_str = 'Zero Initial State';
 end
 rx_band_str = sprintf('f_L = %s, f_H = %s', ...
 format_freq_str(params.rx_common.hpf_cutoff), format_freq_str(params.rx_common.lpf_cutoff));
+noise_p = params.noise_params;
+show_noise_level = noise_p.enable && strcmpi(noise_p.model, 'fixed');
+if ~noise_p.enable
+noise_str = 'Noise Off';
+elseif show_noise_level
+noise_str = sprintf('Noise %s rms (Input-Referred)', format_power_str(noise_p.input_noise_rms));
+else
+noise_str = sprintf('Noise SNR %g dB', noise_p.snr_db);
+end
+P_comp = params.rx_common.compression_power;
+[p_scale, p_unit] = select_power_unit(max(abs(P_rx(:))));
 
 if length(t) > 1
 t_max = max(t);
@@ -663,7 +745,7 @@ end
 t_disp = t * t_scale;
 
 % 上段: 送信光パワー波形 P_tx(t)
-ax_tx = subplot(2, 1, 1);
+ax_tx = subplot(3, 1, 1);
 hold on; grid on;
 for m = 1:M
     plot(t_disp, X(m, :), 'LineWidth', 1.5, 'Color', colors_tx(m, :), ...
@@ -675,8 +757,33 @@ xlim([0, max(t_disp)]);
 title('Transmitted Optical Power P_{tx}(t)');
 legend('Location', 'northeastoutside');
 
+% 中段: 受光器入力の光パワー波形 P_rx(t)
+ax_prx = subplot(3, 1, 2);
+hold on; grid on;
+for n = 1:N
+    plot(t_disp, P_rx(n, :) * p_scale, 'LineWidth', 1.5, 'Color', colors_rx(n, :), ...
+        'DisplayName', sprintf('Rx #%d Received Power', n));
+end
+xlabel(sprintf('Time [%s]', t_unit));
+ylabel(sprintf('Optical Power [%s]', p_unit));
+xlim([0, max(t_disp)]);
+% 雑音レベル・1 dB 圧縮点は表示範囲内にある場合のみ破線で表示
+y_lim_prx = ylim;
+in_range = @(level) level > y_lim_prx(1) && level < y_lim_prx(2);
+if show_noise_level && in_range(noise_p.input_noise_rms * p_scale)
+    plot([t_disp(1), t_disp(end)], [1, 1] * noise_p.input_noise_rms * p_scale, 'k--', 'LineWidth', 1.0, ...
+        'DisplayName', sprintf('Noise Level (%s rms)', format_power_str(noise_p.input_noise_rms)));
+end
+if P_comp > 0 && in_range(P_comp * p_scale)
+    plot([t_disp(1), t_disp(end)], [1, 1] * P_comp * p_scale, 'r--', 'LineWidth', 1.0, ...
+        'DisplayName', sprintf('1 dB Compression (%s)', format_power_str(P_comp)));
+end
+ylim(y_lim_prx);
+title('Received Optical Power P_{rx}(t) (Photoreceiver Input)');
+legend('Location', 'northeastoutside');
+
 % 下段: 受光モジュール出力電圧波形 v_out(t)
-ax_rx = subplot(2, 1, 2);
+ax_rx = subplot(3, 1, 3);
 hold on; grid on;
 for n = 1:N
     plot(t_disp, Y(n, :), 'LineWidth', 1.5, 'Color', colors_rx(n, :), ...
@@ -685,20 +792,21 @@ end
 xlabel(sprintf('Time [%s]', t_unit));
 ylabel('Output Voltage [V]');
 xlim([0, max(t_disp)]);
-title({'Photoreceiver Output Voltage v_{out}(t)', sprintf('(%s, %s)', rx_band_str, state_str)});
+title({'Photoreceiver Output Voltage v_{out}(t)', sprintf('(%s, %s, %s)', rx_band_str, state_str, noise_str)});
 legend('Location', 'northeastoutside');
 
-% 凡例を軸の外に置いた上で、上下の時間軸の幅をそろえる
+% 凡例を軸の外に置いた上で、3段の時間軸の幅をそろえる
 drawnow;
-pos_tx = get(ax_tx, 'Position');
-pos_rx = get(ax_rx, 'Position');
-ax_width = min(pos_tx(3), pos_rx(3));
-set(ax_tx, 'Position', [pos_tx(1), pos_tx(2), ax_width, pos_tx(4)]);
-set(ax_rx, 'Position', [pos_rx(1), pos_rx(2), ax_width, pos_rx(4)]);
+ax_all = [ax_tx, ax_prx, ax_rx];
+pos_all = cell2mat(get(ax_all, 'Position'));
+ax_width = min(pos_all(:, 3));
+for i = 1:numel(ax_all)
+    set(ax_all(i), 'Position', [pos_all(i, 1), pos_all(i, 2), ax_width, pos_all(i, 4)]);
+end
 
 
 else
-subplot(2, 1, 1);
+subplot(3, 1, 1);
 bar(1:M, X, 'FaceColor', [0.85, 0.45, 0.2]);
 xlabel('Transmitter Tx (m)');
 ylabel('Optical Power [W]');
@@ -706,13 +814,21 @@ set(gca, 'XTick', 1:M);
 set(gca, 'XTickLabel', arrayfun(@(i) sprintf('Tx #%d', i), 1:M, 'UniformOutput', false));
 title('Transmitted Static Optical Power P_{tx}');
 
-subplot(2, 1, 2);
+subplot(3, 1, 2);
+bar(1:N, P_rx * p_scale, 'FaceColor', [0.3, 0.65, 0.4]);
+xlabel('Receiver Rx (n)');
+ylabel(sprintf('Optical Power [%s]', p_unit));
+set(gca, 'XTick', 1:N);
+set(gca, 'XTickLabel', arrayfun(@(i) sprintf('Rx #%d', i), 1:N, 'UniformOutput', false));
+title('Received Static Optical Power P_{rx} (Photoreceiver Input)');
+
+subplot(3, 1, 3);
 bar(1:N, Y, 'FaceColor', [0.2, 0.5, 0.8]);
 xlabel('Receiver Rx (n)');
 ylabel('Output Voltage [V]');
 set(gca, 'XTick', 1:N);
 set(gca, 'XTickLabel', arrayfun(@(i) sprintf('Rx #%d', i), 1:N, 'UniformOutput', false));
-title({'Photoreceiver Static Output Voltage v_{out}', sprintf('(%s, DC Analysis)', rx_band_str)});
+title({'Photoreceiver Static Output Voltage v_{out}', sprintf('(%s, DC Analysis, %s)', rx_band_str, noise_str)});
 
 
 end
@@ -774,4 +890,34 @@ s = sprintf('%g kHz', f / 1e3);
 else
 s = sprintf('%g Hz', f);
 end
+end
+
+% =========================================================================
+% 内部関数: 光パワー表示用の単位選択 (W / mW / uW / nW / pW)
+% =========================================================================
+function [p_scale, p_unit] = select_power_unit(p_max)
+if ~(p_max > 0) || p_max >= 1
+p_scale = 1;
+p_unit = 'W';
+elseif p_max >= 1e-3
+p_scale = 1e3;
+p_unit = 'mW';
+elseif p_max >= 1e-6
+p_scale = 1e6;
+p_unit = '\muW';
+elseif p_max >= 1e-9
+p_scale = 1e9;
+p_unit = 'nW';
+else
+p_scale = 1e12;
+p_unit = 'pW';
+end
+end
+
+% =========================================================================
+% 内部関数: 光パワーの表示用文字列 (例: 16 nW, 3 \muW)
+% =========================================================================
+function s = format_power_str(p)
+[p_scale, p_unit] = select_power_unit(p);
+s = sprintf('%g %s', p * p_scale, p_unit);
 end

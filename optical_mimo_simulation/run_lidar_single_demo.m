@@ -12,6 +12,8 @@
 %   - ターゲット距離 9m（往復約 18m）による光の到達遅延（約 60 ns）
 %   - 受光パルスのピーク時刻から求めた TOF とターゲット距離の推定
 %   - 水中伝搬（屈折率 1.33・水質ごとの消散係数）による TOF の増大と受光パルスの減衰
+%   - 受光モジュール C5658 相当（検出感度 2.5e5 V/W、φ0.5 mm、0.05 MHz ～ 1 GHz）の
+%     固定雑音（光入力換算 16 nW rms）による SNR と検出可否
 % =========================================================================
 
 clear;
@@ -69,13 +71,21 @@ params_ts.rx_array(1).pointing_deg =   0.0;      % 正面 0 deg
 params_ts.rx_array(2).pos          = [0.0, -1.050];
 params_ts.rx_array(2).pointing_deg =   0.0;      % 正面 0 deg
 
-% --- 受光器共通仕様 ---
-params_ts.rx_common.aperture_width = 0.01;      % 受光開口幅 10 mm
+% --- 受光器共通仕様 (浜松ホトニクス C5658 相当) ---
+params_ts.rx_common.aperture_width = 0.5e-3;    % 受光開口幅 0.5 mm (受光面 φ0.5 mm を2次元開口幅として扱う)
 params_ts.rx_common.fov_deg        = 45.0;      % 視野角 半角 45 deg
-params_ts.rx_common.responsivity   = 0.60;      % PD感度 0.6 A/W
-params_ts.rx_common.tia_gain       = 1.0e4;     % TIAゲイン 10 kOhm
+params_ts.rx_common.responsivity   = 45.0;      % APD感度 45 A/W (量子効率 70% @800 nm, M = 100 から概算)
+params_ts.rx_common.tia_gain       = 2.5e5 / params_ts.rx_common.responsivity;  % 検出感度 2.5e5 V/W に合わせた変換ゲイン [V/A]
 params_ts.rx_common.hpf_cutoff     = 0.05e6;    % 低域遮断 0.05 MHz (C5658, AC結合)
 params_ts.rx_common.lpf_cutoff     = 1.0e9;     % 高域遮断 1 GHz (C5658)
+params_ts.rx_common.compression_power = 3.0e-6; % 1 dB 圧縮点 3 uW (超過時は警告のみ)
+
+% --- 受光器雑音 (光入力換算の固定雑音) ---
+params_ts.noise_params.enable          = true;
+params_ts.noise_params.model           = 'fixed';
+params_ts.noise_params.input_noise_rms = 16e-9;  % C5658 検出限界 -48 dBm (16 nW rms)
+params_ts.noise_params.seed            = 1;      % 再現性のため乱数シードを固定
+det_threshold = 5.0;                              % パルス検出閾値 (出力雑音 rms の倍数)
 
 % --- 反射ターゲット仕様 (距離 9.0m, 長さ 1.8m) ---
 params_ts.target.distance    = target_distance; % 正面距離 9.0 m
@@ -119,7 +129,16 @@ end
 path_mean = sum(dH_n .* path_n) / sum(dH_n);
 tof_theory = path_mean / c_medium;
 
-% 実測値: 受光波形のピーク時刻（3点放物線補間でサブサンプル推定）
+fprintf('     ・Rx #%d: 受光光パワーのピーク %.3e W, ピーク SNR %.1f dB\n', ...
+    n, info_ts.P_rx_peak(n), info_ts.snr_peak_db(n));
+
+% 雑音を含む出力のピークが検出閾値に届かない場合は検出不可
+if max(y_ts(n, :)) < det_threshold * info_ts.noise_rms_v
+    fprintf('              検出不可 (ピークが雑音 rms の %.0f 倍未満)\n', det_threshold);
+    continue;
+end
+
+% 実測値: 雑音を含む受光波形のピーク時刻（3点放物線補間でサブサンプル推定）
 [~, idx] = max(y_ts(n, :));
 t_peak = t_vec(idx);
 if idx > 1 && idx < num_samples
@@ -133,7 +152,7 @@ if idx > 1 && idx < num_samples
 end
 tof_meas = t_peak - t_fire;
 
-fprintf('     ・Rx #%d: ピーク電圧 %.3e V\n', n, max(y_ts(n, :)));
+fprintf('              ピーク電圧 %.3e V (雑音 rms %.3e V)\n', max(y_ts(n, :)), info_ts.noise_rms_v);
 fprintf('              TOF 理論値 %.3f ns (往復光路長 %.3f m: %.3f ns + 受光回路群遅延 %.3f ns)\n', ...
     (tof_theory + tau_rx) * 1e9, path_mean, tof_theory * 1e9, tau_rx * 1e9);
 fprintf('              TOF 実測値 %.3f ns -> 推定距離 (片道換算, 受光回路遅延補正後) %.3f m\n', ...
@@ -151,12 +170,15 @@ fprintf('--- [ケース 2] 静的DC光パワー解析 (DCブロック無効) ---
 x_static = 1.0;
 params_static = params_ts;
 params_static.rx_common.hpf_cutoff = 0;        % DC解析のため HPF (AC結合) を無効化
+params_static.noise_params.enable = false;      % DC解析のため雑音を無効化
 params_static.enable_plot = false;
 
-[y_static, H_elec_dc, ~, ~] = optical_mimo_simulation(x_static, params_static);
+[y_static, H_elec_dc, ~, info_static] = optical_mimo_simulation(x_static, params_static);
 
 fprintf('  -> 送信光パワー x_static [W]:\n');
 disp(x_static');
+fprintf('  -> 受光光パワー P_rx [W]:\n');
+disp(info_static.P_rx');
 fprintf('  -> 受光直流電圧 y_static [V]:\n');
 disp(y_static');
 
@@ -183,23 +205,48 @@ t_vec_w = 0:dt:t_stop_w;
 num_samples_w = length(t_vec_w);
 x_pulse_w = P_peak * exp(-((t_vec_w - t_fire).^2) / (2 * sigma_p^2));
 
-y_media = zeros(num_media, num_samples_w);
-v_peak = zeros(1, num_media);
+y_media = zeros(num_media, num_samples_w);    % 雑音を含む受光モジュール出力 [V]
+v_sig_media = zeros(num_media, num_samples_w);% 雑音付加前の受光モジュール出力 [V]
+prx_peak = zeros(1, num_media);               % 受光光パワーのピーク [W]
+snr_peak = zeros(1, num_media);               % ピーク SNR [dB]
+is_comp = false(1, num_media);                % 1 dB 圧縮点の超過
 
-fprintf('  -> Rx #%d の受光パルス (ターゲット距離 %.1f m, 発射時刻 %.2f ns):\n', ...
-rx_view, target_distance, t_fire * 1e9);
-fprintf('      n     c [1/m]  ピーク電圧 [V]  空気比 [dB]  TOF [ns]  推定距離 [m]  媒体\n');
+fprintf('  -> Rx #%d の受光パルス (ターゲット距離 %.1f m, 発射時刻 %.2f ns, 検出閾値 雑音 rms の %.0f 倍):\n', ...
+rx_view, target_distance, t_fire * 1e9, det_threshold);
+fprintf('      n     c [1/m]  P_rx ピーク [W]  空気比 [dB]  SNR [dB]  TOF [ns]  推定距離 [m]  媒体\n');
+
+% 1 dB 圧縮点の超過は表の「*」で示すため、媒体ごとの警告は一時的に抑制
+warn_state = warning('query', 'optical_mimo_simulation:compression');
+warning('off', 'optical_mimo_simulation:compression');
 for k = 1:num_media
 params_w = params_ts;
 params_w.enable_plot = false;
 params_w.refractive_index = media_n(k);
 params_w.medium_extinction = media_ext(k);
 
-y_w = optical_mimo_simulation(x_pulse_w, params_w);
+[y_w, ~, ~, info_w] = optical_mimo_simulation(x_pulse_w, params_w);
 y_media(k, :) = y_w(rx_view, :);
+v_sig_media(k, :) = info_w.v_signal(rx_view, :);
+prx_peak(k) = info_w.P_rx_peak(rx_view);
+snr_peak(k) = info_w.snr_peak_db(rx_view);
+is_comp(k) = info_w.is_compressed(rx_view);
+noise_rms_w = info_w.noise_rms_v;
+
+comp_mark = ' ';
+if is_comp(k)
+    comp_mark = '*';
+end
+row_head = sprintf('     %.2f  %5.2f    %.3e%s      %8.2f   %7.1f', media_n(k), media_ext(k), ...
+    prx_peak(k), comp_mark, 10 * log10(prx_peak(k) / prx_peak(1)), snr_peak(k));
+
+% 雑音を含む出力のピークが検出閾値に届かない場合は検出不可
+[v_max, idx] = max(y_media(k, :));
+if v_max < det_threshold * noise_rms_w
+    fprintf('%s     ---      検出不可      %s\n', row_head, media_name{k});
+    continue;
+end
 
 % 受光波形のピーク時刻（3点放物線補間でサブサンプル推定）
-[v_peak(k), idx] = max(y_media(k, :));
 t_peak = t_vec_w(idx);
 if idx > 1 && idx < num_samples_w
     y_l = y_media(k, idx - 1);
@@ -213,13 +260,14 @@ end
 tof_meas = t_peak - t_fire;
 c_medium_k = c0 / media_n(k);
 
-% 受光電圧は光パワーに比例するため、光パワー比は 10 log10 で表す
-fprintf('     %.2f  %5.2f    %.3e      %8.2f    %7.3f   %7.3f       %s\n', ...
-    media_n(k), media_ext(k), v_peak(k), 10 * log10(v_peak(k) / v_peak(1)), ...
-    tof_meas * 1e9, c_medium_k * (tof_meas - tau_rx) / 2, media_name{k});
+fprintf('%s   %7.3f   %7.3f       %s\n', row_head, tof_meas * 1e9, ...
+    c_medium_k * (tof_meas - tau_rx) / 2, media_name{k});
 
 
 end
+warning(warn_state.state, 'optical_mimo_simulation:compression');
+fprintf('     (空気比は受光光パワーの比 10 log10。* は 1 dB 圧縮点 %.3g W 超過で、飽和は模擬していない)\n', ...
+params_ts.rx_common.compression_power);
 fprintf('     (推定距離は媒体中の光速 c0/n と受光回路群遅延 %.3f ns の補正を用いた片道換算値)\n\n', tau_rx * 1e9);
 
 % 媒体ごとの受光パルス比較の可視化
@@ -227,39 +275,44 @@ figure('Name', 'Pulse LiDAR - Underwater Propagation', ...
 'NumberTitle', 'off', 'Position', [100, 100, 820, 560]);
 colors_media = lines(num_media);
 
-% 上段: 各媒体のピークで正規化した受光パルス波形（TOF の違い）
+% 上段: 雑音付加前の受光パルス波形を各ピークで正規化（TOF の違い）
 ax_w1 = subplot(2, 1, 1);
 hold on; grid on;
 for k = 1:num_media
-plot(t_vec_w * 1e9, y_media(k, :) / v_peak(k), 'LineWidth', 1.5, 'Color', colors_media(k, :), ...
+plot(t_vec_w * 1e9, v_sig_media(k, :) / max(v_sig_media(k, :)), 'LineWidth', 1.5, 'Color', colors_media(k, :), ...
     'DisplayName', sprintf('%s (n = %.2f, c = %.2f /m)', media_label{k}, media_n(k), media_ext(k)));
 end
 xlabel('Time [ns]');
 ylabel('Normalized Output');
 xlim([0, t_stop_w * 1e9]);
-title(sprintf('Rx #%d Photoreceiver Output v_{out}(t) (Normalized to Each Peak)', rx_view));
+title(sprintf('Rx #%d Photoreceiver Output v_{out}(t) (Noise-Free, Normalized to Each Peak)', rx_view));
 legend('Location', 'northeastoutside');
 
-% 下段: 空気中を基準とした受光パルスのピーク比 [dB]（消散による減衰、光パワー比 = 10 log10）
+% 下段: 受光パルスのピーク SNR [dB] と検出閾値（赤破線）
 ax_w2 = subplot(2, 1, 2);
-peak_db = 10 * log10(v_peak / v_peak(1));
-bar(1:num_media, peak_db, 'FaceColor', [0.2, 0.5, 0.8]);
+hold on;
+bar(1:num_media, snr_peak, 'FaceColor', [0.2, 0.5, 0.8]);
 grid on;
-y_floor = min(min(peak_db) * 1.25, -10);
-ylim([y_floor, -0.1 * y_floor]);
+snr_th_db = 20 * log10(det_threshold);
+y_lo = min(min(snr_peak) * 1.25, -10);
+y_hi = max(max(snr_peak) * 1.25, snr_th_db * 2);
+ylim([y_lo, y_hi]);
+plot([0.5, num_media + 0.5], [1, 1] * snr_th_db, 'r--', 'LineWidth', 1.2);
 for k = 1:num_media
-db_label = round(peak_db(k) * 10) / 10;
-if abs(db_label) < 0.05
-    db_label = 0;               % "-0.0 dB" 表示の回避
+if snr_peak(k) >= 0
+    text(k, snr_peak(k) + 0.03 * (y_hi - y_lo), sprintf('%.1f dB', snr_peak(k)), ...
+        'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', 'FontSize', 9);
+else
+    text(k, snr_peak(k) - 0.03 * (y_hi - y_lo), sprintf('%.1f dB', snr_peak(k)), ...
+        'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', 'FontSize', 9);
 end
-text(k, min(peak_db(k), 0) - 0.04 * abs(y_floor), sprintf('%.1f dB', db_label), ...
-    'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', 'FontSize', 9);
 end
 set(gca, 'XTick', 1:num_media);
 set(gca, 'XTickLabel', media_tick);
+xlim([0.5, num_media + 0.5]);
 xlabel('Medium (see legend above for n and c)');
-ylabel('Peak Relative to Air [dB]');
-title(sprintf('Rx #%d Peak Output Relative to Air (Target Distance %.1f m)', rx_view, target_distance));
+ylabel('Peak SNR [dB]');
+title(sprintf('Rx #%d Peak SNR (Red Dashed: Detection Threshold %.0f dB)', rx_view, snr_th_db));
 
 % 上下の軸の幅をそろえる（上段の凡例は軸の外）
 drawnow;

@@ -74,13 +74,20 @@ params_ts.rx_array(1).pointing_deg =   0.0;      % 内向き 5 deg
 params_ts.rx_array(2).pos          = [0.0, -1.050];
 params_ts.rx_array(2).pointing_deg =   0.0;      % 内向き 10 deg
 
-% --- 受光器共通仕様 ---
-params_ts.rx_common.aperture_width = 0.01;      % 受光開口幅 10 mm
+% --- 受光器共通仕様 (浜松ホトニクス C5658 相当) ---
+params_ts.rx_common.aperture_width = 0.5e-3;    % 受光開口幅 0.5 mm (受光面 φ0.5 mm を2次元開口幅として扱う)
 params_ts.rx_common.fov_deg        = 45.0;      % 視野角 半角 45 deg
-params_ts.rx_common.responsivity   = 0.60;      % PD感度 0.6 A/W
-params_ts.rx_common.tia_gain       = 1.0e4;     % TIAゲイン 10 kOhm
+params_ts.rx_common.responsivity   = 45.0;      % APD感度 45 A/W (量子効率 70% @800 nm, M = 100 から概算)
+params_ts.rx_common.tia_gain       = 2.5e5 / params_ts.rx_common.responsivity;  % 検出感度 2.5e5 V/W に合わせた変換ゲイン [V/A]
 params_ts.rx_common.hpf_cutoff     = 0.05e6;    % 低域遮断 0.05 MHz (C5658, AC結合)
 params_ts.rx_common.lpf_cutoff     = 1.0e9;     % 高域遮断 1 GHz (C5658)
+params_ts.rx_common.compression_power = 3.0e-6; % 1 dB 圧縮点 3 uW (超過時は警告のみ)
+
+% --- 受光器雑音 (光入力換算の固定雑音) ---
+params_ts.noise_params.enable          = true;
+params_ts.noise_params.model           = 'fixed';
+params_ts.noise_params.input_noise_rms = 16e-9;  % C5658 検出限界 -48 dBm (16 nW rms)
+params_ts.noise_params.seed            = 1;      % 再現性のため乱数シードを固定
 
 % --- 反射ターゲット仕様 (距離 2.0m, 長さ 1.8m) ---
 params_ts.target.distance    = 2.0;             % 正面距離 2.0 m
@@ -98,7 +105,12 @@ disp(H_elec_ts);
 fprintf('     ・チャネル条件数 (Condition Number) : %.3f\n', info_ts.condition_number);
 fprintf('     ・特異値 (Singular Values)         : [%.2e, %.2e]\n', ...
 info_ts.singular_values(1), info_ts.singular_values(2));
-fprintf('     ・行列のランク (Rank)              : %d\n\n', info_ts.rank);
+fprintf('     ・行列のランク (Rank)              : %d\n', info_ts.rank);
+for n = 1:size(y_ts, 1)
+fprintf('     ・Rx #%d: 受光光パワーのピーク %.3e W, ピーク SNR %.1f dB (雑音 rms %.3e V)\n', ...
+    n, info_ts.P_rx_peak(n), info_ts.snr_peak_db(n), info_ts.noise_rms_v);
+end
+fprintf('\n');
 
 %% ========================================================================
 % 【ケース 2】静的DC光パワー解析（スナップショット）
@@ -108,12 +120,15 @@ fprintf('--- [ケース 2] 静的DC光パワー解析 (DCブロック無効) ---
 x_static = [1.0; 0.8];
 params_static = params_ts;
 params_static.rx_common.hpf_cutoff = 0;        % DC解析のため HPF (AC結合) を無効化
+params_static.noise_params.enable = false;      % DC解析のため雑音を無効化
 params_static.enable_plot = false;
 
-[y_static, H_elec_dc, ~, ~] = optical_mimo_simulation(x_static, params_static);
+[y_static, H_elec_dc, ~, info_static] = optical_mimo_simulation(x_static, params_static);
 
 fprintf('  -> 送信光パワー x_static [W]:\n');
 disp(x_static');
+fprintf('  -> 受光光パワー P_rx [W]:\n');
+disp(info_static.P_rx');
 fprintf('  -> 受光直流電圧 y_static [V]:\n');
 disp(y_static');
 

@@ -211,8 +211,12 @@ prx_peak = zeros(1, num_media);               % 受光光パワーのピーク [
 snr_peak = zeros(1, num_media);               % ピーク SNR [dB]
 is_comp = false(1, num_media);                % 1 dB 圧縮点の超過
 
-fprintf('  -> Rx #%d の受光パルス (ターゲット距離 %.1f m, 発射時刻 %.2f ns, 検出閾値 雑音 rms の %.0f 倍):\n', ...
-rx_view, target_distance, t_fire * 1e9, det_threshold);
+noise_in_rms = params_ts.noise_params.input_noise_rms;                      % 光入力換算の雑音 rms [W]
+noise_out_rms = noise_in_rms * params_ts.rx_common.responsivity * params_ts.rx_common.tia_gain;  % 出力換算 [V]
+fprintf('  -> Rx #%d の受光パルス (ターゲット距離 %.1f m, 発射時刻 %.2f ns):\n', ...
+rx_view, target_distance, t_fire * 1e9);
+fprintf('     雑音: 光入力換算 %.3g nW rms (出力換算 %.3g mV rms), 検出閾値: 雑音 rms の %.0f 倍 (%.1f dB)\n', ...
+noise_in_rms * 1e9, noise_out_rms * 1e3, det_threshold, 20 * log10(det_threshold));
 fprintf('      n     c [1/m]  P_rx ピーク [W]  空気比 [dB]  SNR [dB]  TOF [ns]  推定距離 [m]  媒体\n');
 
 % 1 dB 圧縮点の超過は表の「*」で示すため、媒体ごとの警告は一時的に抑制
@@ -270,26 +274,33 @@ fprintf('     (空気比は受光光パワーの比 10 log10。* は 1 dB 圧縮
 params_ts.rx_common.compression_power);
 fprintf('     (推定距離は媒体中の光速 c0/n と受光回路群遅延 %.3f ns の補正を用いた片道換算値)\n\n', tau_rx * 1e9);
 
-% 媒体ごとの受光パルス比較の可視化
-figure('Name', 'Pulse LiDAR - Underwater Propagation', ...
-'NumberTitle', 'off', 'Position', [100, 100, 820, 560]);
-colors_media = lines(num_media);
-
-% 上段: 雑音付加前の受光パルス波形を各ピークで正規化（TOF の違い）
-ax_w1 = subplot(2, 1, 1);
-hold on; grid on;
+% 媒体ごとの受光パルス波形（雑音を含む実際の出力電圧、媒体ごとに縦軸を自動調整）
+figure('Name', 'Pulse LiDAR - Underwater Received Waveforms', ...
+'NumberTitle', 'off', 'Position', [100, 60, 820, 900]);
 for k = 1:num_media
-plot(t_vec_w * 1e9, v_sig_media(k, :) / max(v_sig_media(k, :)), 'LineWidth', 1.5, 'Color', colors_media(k, :), ...
-    'DisplayName', sprintf('%s (n = %.2f, c = %.2f /m)', media_label{k}, media_n(k), media_ext(k)));
-end
-xlabel('Time [ns]');
-ylabel('Normalized Output');
+subplot(num_media, 1, k);
+hold on; grid on;
+plot(t_vec_w * 1e9, y_media(k, :) * 1e3, 'Color', [0.2, 0.5, 0.8], 'LineWidth', 1.0, ...
+    'DisplayName', 'Output with Noise');
+plot(t_vec_w * 1e9, v_sig_media(k, :) * 1e3, 'k--', 'LineWidth', 1.2, ...
+    'DisplayName', 'Noise-Free Signal');
+plot([0, t_stop_w * 1e9], [1, 1] * det_threshold * noise_out_rms * 1e3, 'r:', 'LineWidth', 1.2, ...
+    'DisplayName', sprintf('Detection Threshold (%.0f\\sigma = %.3g mV)', det_threshold, det_threshold * noise_out_rms * 1e3));
 xlim([0, t_stop_w * 1e9]);
-title(sprintf('Rx #%d Photoreceiver Output v_{out}(t) (Noise-Free, Normalized to Each Peak)', rx_view));
-legend('Location', 'northeastoutside');
+ylabel('v_{out} [mV]');
+title(sprintf('%s (n = %.2f, c = %.2f /m): P_{rx} peak %.3g W, SNR %.1f dB', ...
+    media_label{k}, media_n(k), media_ext(k), prx_peak(k), snr_peak(k)));
+if k == 1
+    legend('Location', 'northwest');
+end
+if k == num_media
+    xlabel('Time [ns]');
+end
+end
 
-% 下段: 受光パルスのピーク SNR [dB] と検出閾値（赤破線）
-ax_w2 = subplot(2, 1, 2);
+% 受光パルスのピーク SNR と検出閾値（赤破線）。雑音レベルをタイトルに明示
+figure('Name', 'Pulse LiDAR - Underwater Peak SNR', ...
+'NumberTitle', 'off', 'Position', [940, 60, 760, 540]);
 hold on;
 bar(1:num_media, snr_peak, 'FaceColor', [0.2, 0.5, 0.8]);
 grid on;
@@ -308,17 +319,13 @@ else
 end
 end
 set(gca, 'XTick', 1:num_media);
-set(gca, 'XTickLabel', media_tick);
+set(gca, 'XTickLabel', media_label);
 xlim([0.5, num_media + 0.5]);
-xlabel('Medium (see legend above for n and c)');
+xlabel('Medium');
 ylabel('Peak SNR [dB]');
-title(sprintf('Rx #%d Peak SNR (Red Dashed: Detection Threshold %.0f dB)', rx_view, snr_th_db));
-
-% 上下の軸の幅をそろえる（上段の凡例は軸の外）
-drawnow;
-pos_w1 = get(ax_w1, 'Position');
-pos_w2 = get(ax_w2, 'Position');
-set(ax_w2, 'Position', [pos_w2(1), pos_w2(2), pos_w1(3), pos_w2(4)]);
+title({sprintf('Rx #%d Peak SNR = 20 log_{10}(v_{signal,peak} / \\sigma_{noise})', rx_view), ...
+sprintf('\\sigma_{noise}: %.3g nW rms Input-Referred (%.3g mV rms at Output), Red Dashed: Threshold %.0f dB (%.0f\\sigma)', ...
+noise_in_rms * 1e9, noise_out_rms * 1e3, snr_th_db, det_threshold)});
 
 fprintf('すべてのデモケースが正常に終了しました。\n');
 fprintf('====================================================\n');
